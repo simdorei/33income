@@ -1,0 +1,10 @@
+agent:
+  pc_id: pc-01
+  hostname: WIN-PC-01
+  ip_address: 192.168.10.101
+  control_tower_url: http://192.168.10.10:8330
+  heartbeat_interval_seconds: 30
+
+bot:
+  bot_id: sender-01
+  bot_type: sender

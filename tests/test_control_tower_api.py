@@ -1,0 +1,57 @@
+from fastapi.testclient import TestClient
+
+from income33.config import AppConfig, ControlTowerConfig
+from income33.control_tower.app import create_app
+from income33.control_tower.service import ControlTowerService
+from income33.db import Database
+
+
+def build_client(tmp_path):
+    db_path = tmp_path / "tower.db"
+    config = AppConfig(
+        control_tower=ControlTowerConfig(database_path=str(db_path), mock_agent_count=18)
+    )
+    db = Database(str(db_path))
+    service = ControlTowerService(db=db, mock_agent_count=18)
+    app = create_app(config=config, service=service)
+    return TestClient(app)
+
+
+def test_summary_and_root_dashboard(tmp_path):
+    client = build_client(tmp_path)
+
+    summary = client.get("/api/summary")
+    assert summary.status_code == 200
+    payload = summary.json()
+
+    assert payload["total_agents"] == 18
+    assert payload["total_bots"] == 18
+    assert payload["online_agents"] == 9
+    assert payload["offline_agents"] == 9
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "33income Control Tower" in root.text
+    assert "sender-01" in root.text
+
+
+def test_queue_poll_and_complete_command(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post("/api/bots/sender-01/commands", json={"command": "start"})
+    assert queued.status_code == 200
+    queued_payload = queued.json()
+
+    assert queued_payload["bot_id"] == "sender-01"
+    assert queued_payload["status"] == "pending"
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    polled_payload = polled.json()["commands"]
+    assert len(polled_payload) == 1
+    assert polled_payload[0]["status"] == "running"
+
+    command_id = polled_payload[0]["id"]
+    complete = client.post(f"/api/commands/{command_id}/complete", json={"status": "done"})
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "done"

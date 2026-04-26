@@ -1,0 +1,93 @@
+# LOCAL_SETUP (Windows 기준)
+
+이 문서는 `33income`를 **Windows 로컬 PC에서 바로 실행**하기 위한 단계입니다.
+
+## 0. 전제
+
+- 운영 환경은 전부 Windows
+  - 관제 PC: Windows
+  - 봇 PC 18대: Windows
+- Python 3.10+ 설치 (`py` launcher 사용 가능 상태 권장)
+- Git 설치
+
+## 1. clone + 초기 세팅
+
+```bat
+git clone <repo-url> C:\33income
+cd /d C:\33income
+setup_windows.bat
+```
+
+`setup_windows.bat`가 수행하는 작업:
+
+1. `.venv` 생성
+2. pip 업그레이드
+3. `requirements.txt` 설치
+4. `.env` 생성(없을 때)
+5. `config/control_tower.yaml` 생성(없을 때)
+6. `config/agent.yaml` 생성(없을 때)
+
+## 2. 관제 PC 실행
+
+```bat
+cd /d C:\33income
+run_control_tower.bat
+```
+
+확인 URL:
+
+```text
+http://127.0.0.1:8330
+```
+
+내부망 공개 실행 예:
+
+```bat
+python -m uvicorn income33.control_tower.app:app --host 0.0.0.0 --port 8330
+```
+
+> 이 경우 Windows Defender 방화벽에서 TCP 8330 인바운드 허용 필요.
+
+## 3. 봇 PC 실행
+
+각 봇 PC마다:
+
+```bat
+cd /d C:\33income
+run_agent.bat
+```
+
+단일 디버깅:
+
+```bat
+run_sender.bat
+run_reporter.bat
+```
+
+## 4. 관제 주소 설정
+
+`.env` 또는 `config/agent.yaml`에 관제 주소를 지정합니다.
+
+```text
+CONTROL_TOWER_URL=http://관제PC_IP:8330
+```
+
+예:
+
+```text
+CONTROL_TOWER_URL=http://192.168.10.10:8330
+```
+
+## 5. 폴더 예시 (Windows)
+
+- `C:\33income\data\33income.db`
+- `C:\33income\profiles\sender-01`
+- `C:\33income\logs\sender-01`
+
+## 6. Windows 자동 시작(후보)
+
+현재 레포에서는 자동시작을 직접 구성하지 않습니다. 후보만 유지:
+
+- 시작프로그램 폴더
+- 작업 스케줄러
+- NSSM/서비스화(추후 단계)

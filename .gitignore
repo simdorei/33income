@@ -1,0 +1,30 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+coverage.xml
+htmlcov/
+
+# Virtual environment / secrets
+.venv/
+.env
+
+# Local runtime config (examples are tracked)
+config/control_tower.yaml
+config/agent.yaml
+
+# Runtime data (Windows local PCs)
+data/
+logs/
+profiles/
+tmp/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

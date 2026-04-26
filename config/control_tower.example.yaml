@@ -1,0 +1,10 @@
+server:
+  host: 127.0.0.1
+  port: 8330
+
+database:
+  path: data/33income.db
+
+mock:
+  agent_count: 18
+  stale_seconds: 180
