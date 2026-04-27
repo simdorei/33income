@@ -11,19 +11,28 @@
 
 ---
 
-## 1) 배포 기준: GitHub Download ZIP (권장)
+## 1) 배포 기준: release ZIP (권장)
 
-임시 운영/현장 PC 배포는 **Git clone 없이 GitHub `Code > Download ZIP`** 흐름을 기본으로 권장합니다.
+임시 운영/현장 PC 배포는 **Git clone 대신 release ZIP**을 기본으로 권장합니다.
 
-### 1-1. ZIP 다운로드/압축 해제 (Windows 대상 PC)
+### 1-1. 릴리즈 ZIP 생성 (개발 PC)
 
-1. GitHub 레포 페이지에서 `Code > Download ZIP`
-2. ZIP을 예: `C:\33income-main`에 압축 해제
-3. 필요하면 폴더명을 `C:\33income`으로 변경
+```bash
+cd /path/to/33income
+PYTHONPATH=src python scripts/make_release_zip.py
+```
 
-### 1-2. 초기 실행
+출력 예:
 
-관제 PC:
+```text
+dist/33income-release-20260427-123456Z.zip
+```
+
+### 1-2. Windows 대상 PC 배포
+
+1. ZIP을 대상 PC로 복사
+2. `C:\33income`에 압축 해제
+3. 아래 실행
 
 ```bat
 cd /d C:\33income
@@ -31,7 +40,7 @@ setup_windows.bat
 run_control_tower.bat
 ```
 
-봇 PC:
+봇 PC는:
 
 ```bat
 cd /d C:\33income
@@ -39,19 +48,9 @@ setup_windows.bat
 run_agent.bat
 ```
 
-### 1-3. ZIP 방식 업데이트 시 주의
-
-- GitHub ZIP에는 `.env`, `data/`, `logs/`가 포함되지 않습니다.
-- `setup_windows.bat`는 `.env`와 `config/*.yaml`이 없을 때 example 파일을 복사해 초기화합니다.
-- 기존 운영값을 유지하려면 **새 ZIP을 다른 폴더에 푼 뒤** 아래를 기존 폴더에서 복사하세요.
-  - `.env`
-  - `config/control_tower.yaml`, `config/agent.yaml`
-  - `data/`
-  - `logs/`
-
 ---
 
-## 2) Windows 빠른 시작 (Git clone은 선택사항)
+## 2) Windows 빠른 시작 (개발용 clone)
 
 예시 경로:
 
@@ -169,33 +168,11 @@ CONTROL_TOWER_URL=http://192.168.10.10:8330
 - `docs/LOCAL_SETUP.md` - Windows 로컬 셋업 상세
 - `docs/CONTROL_TOWER.md` - 컨트롤타워 API/대시보드
 - `docs/AGENT_PC_SETUP.md` - 봇 PC별 배치/설정
-- `docs/CAPTURE_MODE.md` - 로그인된 브라우저 request 자동 캡처 MVP
+- `docs/RELEASE_ZIP.md` - release ZIP 생성/배포 절차
 
 ---
 
-## 7) Capture Mode: 로그인된 브라우저 요청 캡처
-
-수동으로 DevTools 헤더/body를 복사하지 않고, 로그인된 브라우저에서 발생하는 `fetch`/`XHR`을 로컬 파일로 저장한다.
-
-```bat
-cd /d C:\33income
-setup_windows.bat
-run_capture_helper.bat
-```
-
-그 다음 로그인된 페이지에서 `browser_capture_snippet.js`를 DevTools Console/Snippets로 실행하고 평소 작업을 수행한다.
-
-결과 파일:
-
-```text
-C:\33income\captures\YYYYMMDD\captures.jsonl
-```
-
-기본값으로 `Cookie`, `Authorization`, `token/session/csrf` 계열 헤더 값은 redaction된다.
-
----
-
-## 8) 개발 서버(Linux) 검증용만
+## 7) 개발 서버(Linux) 검증용만
 
 실운영은 Windows가 기준이며, 아래는 개발/검증 환경에서만 사용합니다.
 

@@ -13,7 +13,6 @@ EXCLUDED_DIR_NAMES = {
     "data",
     "logs",
     "profiles",
-    "captures",
     "tmp",
     "dist",
 }
