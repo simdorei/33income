@@ -4,15 +4,30 @@
 
 ## 1. 배포/설치
 
-권장: release ZIP을 받아 `C:\33income`에 압축 해제 후 실행.
+권장: GitHub 레포 페이지에서 `Code > Download ZIP`으로 받아 `C:\33income`에 압축 해제 후 실행.
 
-개발 clone 방식:
+예)
+
+1. ZIP 다운로드 후 `C:\33income-main`에 압축 해제
+2. 필요 시 폴더명을 `C:\33income`으로 변경
+3. `setup_windows.bat` 실행
+
+개발 clone 방식(선택):
 
 ```bat
 git clone <repo-url> C:\33income
 cd /d C:\33income
 setup_windows.bat
 ```
+
+ZIP 업데이트 시 기존 운영값 유지:
+
+- 새 ZIP은 다른 폴더에 먼저 풉니다.
+- 기존 폴더에서 아래를 복사합니다.
+  - `.env`
+  - `config/agent.yaml`
+  - `data/`
+  - `logs/`
 
 ## 2. agent 설정
 

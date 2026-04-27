@@ -8,22 +8,17 @@
   - 관제 PC: Windows
   - 봇 PC 18대: Windows
 - Python 3.10+ 설치 (`py` launcher 사용 가능 상태 권장)
-- Git 설치
+- Git은 필수 아님 (자주 업데이트하는 개발자용 선택사항)
 
 ## 1. 배포 방식
 
-### 권장: release ZIP 배포
+### 권장: GitHub Download ZIP 배포
 
-개발 PC에서:
+1. GitHub 레포 페이지에서 `Code > Download ZIP`
+2. ZIP을 `C:\33income-main` 등에 압축 해제
+3. 필요하면 폴더명을 `C:\33income`으로 변경
 
-```bash
-cd /path/to/33income
-PYTHONPATH=src python scripts/make_release_zip.py
-```
-
-생성된 ZIP을 대상 PC로 복사 후 `C:\33income`에 압축 해제합니다.
-
-### 개발용: git clone 배포
+### 선택: 개발용 git clone 배포
 
 ```bat
 git clone <repo-url> C:\33income
@@ -46,6 +41,17 @@ setup_windows.bat
 5. `config/control_tower.yaml` 생성(없을 때)
 6. `config/agent.yaml` 생성(없을 때)
 7. `logs` 폴더 생성
+
+## 2-1. ZIP 업데이트 시 데이터 보존
+
+- GitHub ZIP에는 `.env`, `data/`, `logs/`가 포함되지 않습니다.
+- 기존 운영값을 유지하려면 **새 ZIP을 다른 폴더에 풀고**, 아래를 기존 폴더에서 복사하세요.
+  - `.env`
+  - `config/control_tower.yaml`, `config/agent.yaml`
+  - `data/`
+  - `logs/`
+
+`setup_windows.bat`는 `.env`/`config/*.yaml`이 없을 때 example 파일을 복사해 초기화합니다.
 
 ## 3. 관제 PC 실행
 

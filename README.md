@@ -11,28 +11,19 @@
 
 ---
 
-## 1) 배포 기준: release ZIP (권장)
+## 1) 배포 기준: GitHub Download ZIP (권장)
 
-임시 운영/현장 PC 배포는 **Git clone 대신 release ZIP**을 기본으로 권장합니다.
+임시 운영/현장 PC 배포는 **Git clone 없이 GitHub `Code > Download ZIP`** 흐름을 기본으로 권장합니다.
 
-### 1-1. 릴리즈 ZIP 생성 (개발 PC)
+### 1-1. ZIP 다운로드/압축 해제 (Windows 대상 PC)
 
-```bash
-cd /path/to/33income
-PYTHONPATH=src python scripts/make_release_zip.py
-```
+1. GitHub 레포 페이지에서 `Code > Download ZIP`
+2. ZIP을 예: `C:\33income-main`에 압축 해제
+3. 필요하면 폴더명을 `C:\33income`으로 변경
 
-출력 예:
+### 1-2. 초기 실행
 
-```text
-dist/33income-release-20260427-123456Z.zip
-```
-
-### 1-2. Windows 대상 PC 배포
-
-1. ZIP을 대상 PC로 복사
-2. `C:\33income`에 압축 해제
-3. 아래 실행
+관제 PC:
 
 ```bat
 cd /d C:\33income
@@ -40,7 +31,7 @@ setup_windows.bat
 run_control_tower.bat
 ```
 
-봇 PC는:
+봇 PC:
 
 ```bat
 cd /d C:\33income
@@ -48,9 +39,19 @@ setup_windows.bat
 run_agent.bat
 ```
 
+### 1-3. ZIP 방식 업데이트 시 주의
+
+- GitHub ZIP에는 `.env`, `data/`, `logs/`가 포함되지 않습니다.
+- `setup_windows.bat`는 `.env`와 `config/*.yaml`이 없을 때 example 파일을 복사해 초기화합니다.
+- 기존 운영값을 유지하려면 **새 ZIP을 다른 폴더에 푼 뒤** 아래를 기존 폴더에서 복사하세요.
+  - `.env`
+  - `config/control_tower.yaml`, `config/agent.yaml`
+  - `data/`
+  - `logs/`
+
 ---
 
-## 2) Windows 빠른 시작 (개발용 clone)
+## 2) Windows 빠른 시작 (Git clone은 선택사항)
 
 예시 경로:
 
@@ -168,7 +169,6 @@ CONTROL_TOWER_URL=http://192.168.10.10:8330
 - `docs/LOCAL_SETUP.md` - Windows 로컬 셋업 상세
 - `docs/CONTROL_TOWER.md` - 컨트롤타워 API/대시보드
 - `docs/AGENT_PC_SETUP.md` - 봇 PC별 배치/설정
-- `docs/RELEASE_ZIP.md` - release ZIP 생성/배포 절차
 
 ---
 
