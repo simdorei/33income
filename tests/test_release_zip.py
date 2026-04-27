@@ -18,6 +18,7 @@ def test_collect_release_files_excludes_runtime_and_local_files(tmp_path):
     _touch(tmp_path / "data/33income.db")
     _touch(tmp_path / "logs/agent.log")
     _touch(tmp_path / "profiles/sender-01/state.json")
+    _touch(tmp_path / "captures/20260427/captures.jsonl")
     _touch(tmp_path / "tmp/cache.txt")
     _touch(tmp_path / ".env")
     _touch(tmp_path / "config/control_tower.yaml")
@@ -34,6 +35,7 @@ def test_collect_release_files_excludes_runtime_and_local_files(tmp_path):
     assert "data/33income.db" not in rel_paths
     assert "logs/agent.log" not in rel_paths
     assert "profiles/sender-01/state.json" not in rel_paths
+    assert "captures/20260427/captures.jsonl" not in rel_paths
     assert "tmp/cache.txt" not in rel_paths
     assert ".env" not in rel_paths
     assert "config/control_tower.yaml" not in rel_paths

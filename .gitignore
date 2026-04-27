@@ -21,6 +21,7 @@ config/agent.yaml
 data/
 logs/
 profiles/
+captures/
 tmp/
 dist/
 
