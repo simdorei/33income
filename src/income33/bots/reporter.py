@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import time
 
 from income33.bots.base import BaseBotRunner
+from income33.logging_utils import setup_component_logger
 
 
 class ReporterBotRunner(BaseBotRunner):
@@ -25,6 +27,9 @@ class ReporterBotRunner(BaseBotRunner):
 
 
 def main() -> None:
+    setup_component_logger("income33.reporter", "reporter.log")
+    logger = logging.getLogger("income33.reporter.runner")
+
     parser = argparse.ArgumentParser(description="Mock reporter bot runner")
     parser.add_argument("--bot-id", default=os.getenv("INCOME33_AGENT_BOT_ID", "reporter-01"))
     parser.add_argument("--interval", type=float, default=3.0)
@@ -34,13 +39,17 @@ def main() -> None:
     runner = ReporterBotRunner(bot_id=args.bot_id)
 
     if args.once:
-        print(json.dumps(runner.tick().__dict__, ensure_ascii=False))
+        snapshot = runner.tick()
+        logger.info("reporter_once_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
         return
 
-    print(f"[reporter] start bot_id={args.bot_id}")
+    logger.info("reporter_runner_started bot_id=%s interval=%s", args.bot_id, args.interval)
     while True:
-        snapshot = runner.tick()
-        print(json.dumps(snapshot.__dict__, ensure_ascii=False))
+        try:
+            snapshot = runner.tick()
+            logger.debug("reporter_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
+        except Exception:
+            logger.exception("reporter_tick_failed bot_id=%s", args.bot_id)
         time.sleep(args.interval)
 
 

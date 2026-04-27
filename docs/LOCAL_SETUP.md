@@ -10,10 +10,29 @@
 - Python 3.10+ 설치 (`py` launcher 사용 가능 상태 권장)
 - Git 설치
 
-## 1. clone + 초기 세팅
+## 1. 배포 방식
+
+### 권장: release ZIP 배포
+
+개발 PC에서:
+
+```bash
+cd /path/to/33income
+PYTHONPATH=src python scripts/make_release_zip.py
+```
+
+생성된 ZIP을 대상 PC로 복사 후 `C:\33income`에 압축 해제합니다.
+
+### 개발용: git clone 배포
 
 ```bat
 git clone <repo-url> C:\33income
+cd /d C:\33income
+```
+
+## 2. 초기 세팅
+
+```bat
 cd /d C:\33income
 setup_windows.bat
 ```
@@ -26,8 +45,9 @@ setup_windows.bat
 4. `.env` 생성(없을 때)
 5. `config/control_tower.yaml` 생성(없을 때)
 6. `config/agent.yaml` 생성(없을 때)
+7. `logs` 폴더 생성
 
-## 2. 관제 PC 실행
+## 3. 관제 PC 실행
 
 ```bat
 cd /d C:\33income
@@ -48,7 +68,7 @@ python -m uvicorn income33.control_tower.app:app --host 0.0.0.0 --port 8330
 
 > 이 경우 Windows Defender 방화벽에서 TCP 8330 인바운드 허용 필요.
 
-## 3. 봇 PC 실행
+## 4. 봇 PC 실행
 
 각 봇 PC마다:
 
@@ -64,7 +84,30 @@ run_sender.bat
 run_reporter.bat
 ```
 
-## 4. 관제 주소 설정
+## 5. 로그/타임아웃 설정
+
+기본 예시 (`.env`):
+
+```text
+INCOME33_LOG_LEVEL=DEBUG
+INCOME33_LOG_DIR=logs
+INCOME33_HTTP_TIMEOUT_SECONDS=10
+```
+
+로그 파일:
+
+- `logs/control_tower.log`
+- `logs/agent.log`
+- `logs/sender.log`
+- `logs/reporter.log`
+
+운영에서 로그량을 줄일 때:
+
+```text
+INCOME33_LOG_LEVEL=INFO
+```
+
+## 6. 관제 주소 설정
 
 `.env` 또는 `config/agent.yaml`에 관제 주소를 지정합니다.
 
@@ -78,13 +121,13 @@ CONTROL_TOWER_URL=http://관제PC_IP:8330
 CONTROL_TOWER_URL=http://192.168.10.10:8330
 ```
 
-## 5. 폴더 예시 (Windows)
+## 7. 폴더 예시 (Windows)
 
 - `C:\33income\data\33income.db`
 - `C:\33income\profiles\sender-01`
-- `C:\33income\logs\sender-01`
+- `C:\33income\logs\agent.log`
 
-## 6. Windows 자동 시작(후보)
+## 8. Windows 자동 시작(후보)
 
 현재 레포에서는 자동시작을 직접 구성하지 않습니다. 후보만 유지:
 

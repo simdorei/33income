@@ -19,6 +19,10 @@ if not exist ".env" (
     echo [WARN] .env not found. Using defaults.
 )
 
+if "%INCOME33_LOG_LEVEL%"=="" set "INCOME33_LOG_LEVEL=DEBUG"
+if "%INCOME33_LOG_DIR%"=="" set "INCOME33_LOG_DIR=logs"
+if not exist "%INCOME33_LOG_DIR%" mkdir "%INCOME33_LOG_DIR%"
+
 set "HOST=%INCOME33_CONTROL_TOWER_HOST%"
 if "%HOST%"=="" set "HOST=127.0.0.1"
 set "PORT=%INCOME33_CONTROL_TOWER_PORT%"

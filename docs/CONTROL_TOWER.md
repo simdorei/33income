@@ -23,6 +23,21 @@ python -m uvicorn income33.control_tower.app:app --host 0.0.0.0 --port 8330
 
 > 내부망 공개 시 Windows 방화벽에서 8330 허용 필요.
 
+## 로그
+
+기본 로그 파일:
+
+- `logs/control_tower.log`
+
+환경변수:
+
+```text
+INCOME33_LOG_LEVEL=DEBUG
+INCOME33_LOG_DIR=logs
+```
+
+운영에서는 `INCOME33_LOG_LEVEL=INFO`로 낮출 수 있습니다.
+
 ## 기본 URL
 
 - `http://127.0.0.1:8330`

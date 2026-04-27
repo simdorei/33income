@@ -22,6 +22,7 @@ data/
 logs/
 profiles/
 tmp/
+dist/
 
 # IDE / OS
 .vscode/

@@ -19,42 +19,49 @@ if %ERRORLEVEL%==0 (
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [1/6] Creating virtual environment (.venv)...
+    echo [1/7] Creating virtual environment (.venv)...
     %PY_CMD% -m venv .venv
     if errorlevel 1 goto :fail
 ) else (
-    echo [1/6] .venv already exists. Skipping creation.
+    echo [1/7] .venv already exists. Skipping creation.
 )
 
-echo [2/6] Upgrading pip...
+echo [2/7] Upgrading pip...
 call ".venv\Scripts\activate.bat"
 if errorlevel 1 goto :fail
 python -m pip install --upgrade pip
 if errorlevel 1 goto :fail
 
-echo [3/6] Installing requirements...
+echo [3/7] Installing requirements...
 pip install -r requirements.txt
 if errorlevel 1 goto :fail
 
 if not exist ".env" (
-    echo [4/6] Creating .env from .env.example...
+    echo [4/7] Creating .env from .env.example...
     copy /Y ".env.example" ".env" >nul
 ) else (
-    echo [4/6] .env already exists. Skipping copy.
+    echo [4/7] .env already exists. Skipping copy.
 )
 
 if not exist "config\control_tower.yaml" (
-    echo [5/6] Creating config\control_tower.yaml from example...
+    echo [5/7] Creating config\control_tower.yaml from example...
     copy /Y "config\control_tower.example.yaml" "config\control_tower.yaml" >nul
 ) else (
-    echo [5/6] config\control_tower.yaml already exists. Skipping copy.
+    echo [5/7] config\control_tower.yaml already exists. Skipping copy.
 )
 
 if not exist "config\agent.yaml" (
-    echo [6/6] Creating config\agent.yaml from example...
+    echo [6/7] Creating config\agent.yaml from example...
     copy /Y "config\agent.example.yaml" "config\agent.yaml" >nul
 ) else (
-    echo [6/6] config\agent.yaml already exists. Skipping copy.
+    echo [6/7] config\agent.yaml already exists. Skipping copy.
+)
+
+if not exist "logs" (
+    echo [7/7] Creating logs directory...
+    mkdir "logs"
+) else (
+    echo [7/7] logs directory already exists. Skipping creation.
 )
 
 echo.

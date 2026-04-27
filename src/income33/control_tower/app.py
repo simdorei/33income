@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from html import escape
 from typing import Any
 
@@ -10,7 +11,11 @@ from fastapi.responses import HTMLResponse
 from income33.config import AppConfig, load_config
 from income33.control_tower.service import ControlTowerService
 from income33.db import Database
+from income33.logging_utils import setup_component_logger
 from income33.models import CommandCompleteRequest, CommandRequest, HeartbeatRequest
+
+setup_component_logger("income33.control_tower", "control_tower.log")
+logger = logging.getLogger("income33.control_tower.app")
 
 
 def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -115,6 +120,13 @@ def create_app(
     app.state.config = resolved_config
     app.state.service = resolved_service
 
+    logger.info(
+        "control_tower_app_ready host=%s port=%s db_path=%s",
+        resolved_config.control_tower.host,
+        resolved_config.control_tower.port,
+        resolved_config.control_tower.database_path,
+    )
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> str:
         payload = app.state.service.build_dashboard()
@@ -149,6 +161,7 @@ def create_app(
                 payload=body.payload,
             )
         except KeyError as exc:
+            logger.warning("queue_command_not_found bot_id=%s", bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return command
 
@@ -169,6 +182,7 @@ def create_app(
                 error_message=body.error_message,
             )
         except KeyError as exc:
+            logger.warning("complete_command_not_found command_id=%s", command_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return command
 
@@ -185,6 +199,11 @@ app = create_app()
 
 def main() -> None:
     runtime_config = load_config()
+    logger.info(
+        "control_tower_start host=%s port=%s",
+        runtime_config.control_tower.host,
+        runtime_config.control_tower.port,
+    )
     uvicorn.run(
         "income33.control_tower.app:app",
         host=runtime_config.control_tower.host,
