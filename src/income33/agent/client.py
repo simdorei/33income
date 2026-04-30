@@ -38,10 +38,31 @@ class ControlTowerClient:
             raise
 
         body = response.json()
-        self.logger.debug(
-            "send_heartbeat accepted status_code=%s pc_id=%s",
+        self.logger.info(
+            "CONNECTED heartbeat accepted status_code=%s pc_id=%s bot_id=%s",
             response.status_code,
             payload.get("pc_id"),
+            payload.get("bot_id"),
+        )
+        return body
+
+    def health_check(self) -> dict[str, Any]:
+        """Verify that the control tower is reachable before the main loop starts."""
+
+        self.logger.info("checking control tower connection tower=%s", self.base_url)
+        try:
+            response = requests.get(f"{self.base_url}/api/health", timeout=self.timeout)
+            response.raise_for_status()
+        except requests.RequestException:
+            self.logger.exception("CONTROL TOWER CONNECTION FAILED tower=%s", self.base_url)
+            raise
+
+        body = response.json()
+        self.logger.info(
+            "CONNECTED control tower health ok tower=%s status_code=%s status=%s",
+            self.base_url,
+            response.status_code,
+            body.get("status"),
         )
         return body
 
@@ -59,7 +80,7 @@ class ControlTowerClient:
             raise
 
         commands = response.json().get("commands", [])
-        self.logger.debug("poll_commands received count=%s pc_id=%s", len(commands), pc_id)
+        self.logger.info("CONNECTED command poll ok count=%s pc_id=%s", len(commands), pc_id)
         return commands
 
     def complete_command(

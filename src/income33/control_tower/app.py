@@ -142,7 +142,8 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
       </head>
       <body>
         <h1>33income Control Tower</h1>
-        <p>Mock 관제 대시보드 (Windows 런타임 기준)</p>
+        <p>관제 대시보드 (Windows 런타임 기준)</p>
+        <p><strong>연결 확인:</strong> 에이전트가 붙으면 아래 Agents/Bots 표의 <code>last_heartbeat_at</code> 시간이 갱신됩니다. 이 페이지를 새로고침해서 확인하세요.</p>
 
         <div class='card'>
           <h2>요약</h2>

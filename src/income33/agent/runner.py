@@ -244,7 +244,7 @@ def main() -> None:
     setup_component_logger("income33.agent", "agent.log")
     logger = logging.getLogger("income33.agent.runner")
 
-    parser = argparse.ArgumentParser(description="Run income33 mock local agent")
+    parser = argparse.ArgumentParser(description="Run income33 local agent")
     parser.add_argument("--once", action="store_true", help="heartbeat/poll only once")
     args = parser.parse_args()
 
@@ -253,6 +253,21 @@ def main() -> None:
         base_url=config.agent.control_tower_url,
         logger=logging.getLogger("income33.agent.client"),
     )
+    logger.info(
+        "AGENT START pc_id=%s bot_id=%s tower=%s",
+        config.agent.pc_id,
+        config.agent.bot_id,
+        config.agent.control_tower_url,
+    )
+    try:
+        client.health_check()
+    except Exception:
+        logger.error(
+            "AGENT CANNOT CONNECT tower=%s - check control tower host, port, firewall, and agent .env URL",
+            config.agent.control_tower_url,
+        )
+        raise
+
     runner = MockAgentRunner(agent=config.agent, client=client, logger=logger)
 
     if args.once:

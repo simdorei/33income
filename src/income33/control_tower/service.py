@@ -89,8 +89,8 @@ class ControlTowerService:
 
     def receive_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         record = self.db.upsert_heartbeat(payload)
-        logger.debug(
-            "heartbeat_received pc_id=%s bot_id=%s bot_status=%s step=%s",
+        logger.info(
+            "AGENT CONNECTED heartbeat_received pc_id=%s bot_id=%s bot_status=%s step=%s",
             payload.get("pc_id"),
             payload.get("bot_id"),
             payload.get("bot_status"),
