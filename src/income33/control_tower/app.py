@@ -29,6 +29,11 @@ DASHBOARD_ALLOWED_COMMANDS = {
     "refresh_page",
 }
 
+BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
+    ("발송 봇 01-09", "sender", 1, 9, 0),
+    ("신고 봇 01-09", "reporter", 1, 9, 9),
+]
+
 
 def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     header = "".join(f"<th>{escape(col)}</th>" for col in columns)
@@ -84,10 +89,43 @@ def _bot_actions_html(bot_id: str) -> str:
     return " ".join(buttons)
 
 
+def _build_fixed_slot_bot_sections(raw_bots: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    bot_map = {str(bot.get("bot_id", "")): bot for bot in raw_bots}
+    sections: list[tuple[str, list[dict[str, Any]]]] = []
+
+    for section_title, bot_type, start, end, pc_offset in BOT_DISPLAY_GROUPS:
+        section_rows: list[dict[str, Any]] = []
+        for slot in range(start, end + 1):
+            bot_id = f"{bot_type}-{slot:02d}"
+            row = dict(bot_map.get(bot_id) or {})
+            if not row:
+                row = {
+                    "bot_id": bot_id,
+                    "bot_type": bot_type,
+                    "pc_id": f"pc-{slot + pc_offset:02d}",
+                    "status": "connection_required",
+                    "current_step": "접속필요",
+                    "last_heartbeat_at": None,
+                    "success_count": 0,
+                    "failure_count": 0,
+                }
+
+            if not row.get("last_heartbeat_at"):
+                row["status"] = row.get("status") or "connection_required"
+                row["current_step"] = "접속필요"
+
+            row["actions"] = _bot_actions_html(bot_id)
+            section_rows.append(row)
+
+        sections.append((section_title, section_rows))
+
+    return sections
+
+
 def _render_dashboard_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     agents = payload["agents"]
-    bots = [{**bot, "actions": _bot_actions_html(str(bot.get("bot_id", "")))} for bot in payload["bots"]]
+    bot_sections = _build_fixed_slot_bot_sections(payload["bots"])
 
     summary_items = "".join(
         f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>" for key, value in summary.items()
@@ -114,7 +152,15 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
     ]
 
     agents_html = _build_html_table(agent_columns, agents)
-    bots_html = _build_html_table(bot_columns, bots)
+    bot_sections_html = "".join(
+        (
+            "<div class='card'>"
+            f"<h2>{escape(section_title)}</h2>"
+            f"{_build_html_table(bot_columns, rows)}"
+            "</div>"
+        )
+        for section_title, rows in bot_sections
+    )
 
     return f"""
     <!doctype html>
@@ -143,7 +189,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
       <body>
         <h1>33income Control Tower</h1>
         <p>관제 대시보드 (Windows 런타임 기준)</p>
-        <p><strong>연결 확인:</strong> 에이전트가 붙으면 아래 Agents/Bots 표의 <code>last_heartbeat_at</code> 시간이 갱신됩니다. 이 페이지를 새로고침해서 확인하세요.</p>
+        <p><strong>연결 확인:</strong> 발송/신고 표가 01번부터 고정으로 표시됩니다. 아직 에이전트가 붙지 않은 봇은 <code>접속필요</code>로 보이고, 붙으면 <code>last_heartbeat_at</code> 시간이 갱신됩니다.</p>
 
         <div class='card'>
           <h2>요약</h2>
@@ -156,10 +202,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           {agents_html}
         </div>
 
-        <div class='card'>
-          <h2>Bots</h2>
-          {bots_html}
-        </div>
+        {bot_sections_html}
       </body>
     </html>
     """

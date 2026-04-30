@@ -111,7 +111,7 @@ class Database:
                 pc_id = f"pc-{index:02d}"
                 hostname = f"WIN-PC-{index:02d}"
                 ip_address = f"192.168.10.{100 + index}"
-                agent_status = "online" if index % 2 == 1 else "offline"
+                agent_status = "offline"
 
                 if index <= 9:
                     bot_type = "sender"
@@ -121,8 +121,8 @@ class Database:
                     bot_seq = index - 9
 
                 bot_id = f"{bot_type}-{bot_seq:02d}"
-                bot_status = "running" if agent_status == "online" else "idle"
-                step = "mock_cycle" if agent_status == "online" else "waiting_for_start"
+                bot_status = "connection_required"
+                step = "접속필요"
 
                 conn.execute(
                     """
@@ -138,7 +138,7 @@ class Database:
                         agent_status,
                         "0.1.0",
                         bot_id,
-                        now,
+                        None,
                         now,
                     ),
                 )
@@ -157,7 +157,7 @@ class Database:
                         pc_id,
                         bot_status,
                         f"profiles\\{bot_id}",
-                        now,
+                        None,
                         step,
                         0,
                         0,

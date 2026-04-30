@@ -14,10 +14,16 @@ def test_init_and_seed_mock_data(tmp_path):
 
     assert summary["total_agents"] == 18
     assert summary["total_bots"] == 18
-    assert summary["online_agents"] == 9
-    assert summary["offline_agents"] == 9
+    assert summary["online_agents"] == 0
+    assert summary["offline_agents"] == 18
     assert summary["sender_bots"] == 9
     assert summary["reporter_bots"] == 9
+
+    sender01 = db.get_bot("sender-01")
+    assert sender01 is not None
+    assert sender01["status"] == "connection_required"
+    assert sender01["current_step"] == "접속필요"
+    assert sender01["last_heartbeat_at"] is None
 
 
 def test_enqueue_and_poll_commands(tmp_path):
