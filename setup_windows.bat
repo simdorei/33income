@@ -12,7 +12,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     where python >nul 2>nul
     if not %ERRORLEVEL%==0 (
-        echo [ERROR] Python launcher(py^) or python.exe was not found.
+        echo [ERROR] Python launcher py or python.exe was not found.
         echo         Install Python 3.10+ from https://www.python.org/downloads/windows/
         goto :fail
     )
@@ -20,7 +20,7 @@ if %ERRORLEVEL%==0 (
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [1/7] Creating virtual environment (.venv)...
+    echo [1/7] Creating virtual environment .venv...
     %PY_CMD% -m venv .venv
     if errorlevel 1 goto :fail
 ) else (
