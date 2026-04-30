@@ -5,7 +5,7 @@ from html import escape
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from income33.config import AppConfig, load_config
@@ -16,6 +16,18 @@ from income33.models import CommandCompleteRequest, CommandRequest, HeartbeatReq
 
 setup_component_logger("income33.control_tower", "control_tower.log")
 logger = logging.getLogger("income33.control_tower.app")
+
+
+DASHBOARD_ALLOWED_COMMANDS = {
+    "start",
+    "stop",
+    "restart",
+    "status",
+    "open_login",
+    "login_done",
+    "fill_login",
+    "refresh_page",
+}
 
 
 def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -47,29 +59,38 @@ def _command_button(bot_id: str, command: str, label: str, css_class: str = "") 
     )
 
 
-def _bot_actions_html(bot_id: str) -> str:
-    return " ".join(
-        [
-            _command_button(bot_id, "start", "시작"),
-            _command_button(bot_id, "stop", "중지", "danger"),
-            _command_button(bot_id, "restart", "재시작"),
-            _command_button(bot_id, "open_login", "로그인 열기", "login"),
-            _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
-        ]
+def _submit_auth_code_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/auth-code' class='inline-form'>"
+        "<input type='password' name='auth_code' placeholder='인증코드 입력' "
+        "autocomplete='one-time-code' required />"
+        "<button type='submit' class='auth'>인증코드 제출</button>"
+        "</form>"
     )
+
+
+def _bot_actions_html(bot_id: str) -> str:
+    buttons = [
+        _command_button(bot_id, "start", "시작"),
+        _command_button(bot_id, "stop", "중지", "danger"),
+        _command_button(bot_id, "restart", "재시작"),
+        _command_button(bot_id, "open_login", "로그인 열기", "login"),
+        _command_button(bot_id, "fill_login", "로그인 입력", "login"),
+        _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
+        _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
+        _submit_auth_code_form(bot_id),
+    ]
+    return " ".join(buttons)
 
 
 def _render_dashboard_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     agents = payload["agents"]
-    bots = [
-        {**bot, "actions": _bot_actions_html(str(bot.get("bot_id", "")))}
-        for bot in payload["bots"]
-    ]
+    bots = [{**bot, "actions": _bot_actions_html(str(bot.get("bot_id", "")))} for bot in payload["bots"]]
 
     summary_items = "".join(
-        f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>"
-        for key, value in summary.items()
+        f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>" for key, value in summary.items()
     )
 
     agent_columns = [
@@ -106,12 +127,16 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           h1, h2 {{ color: #1f2937; }}
           .card {{ background: #fff; padding: 16px; border-radius: 8px; margin-bottom: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
           table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
-          th, td {{ border: 1px solid #e5e7eb; padding: 8px; text-align: left; }}
+          th, td {{ border: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }}
           th {{ background: #f3f4f6; }}
           button {{ margin: 2px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }}
+          .inline-form {{ display: inline; margin-left: 6px; }}
+          .inline-form input {{ width: 130px; margin-right: 4px; padding: 4px 6px; }}
           button.danger {{ color: #b91c1c; }}
           button.login {{ background: #eef2ff; border-color: #818cf8; }}
           button.login-done {{ background: #ecfdf5; border-color: #34d399; }}
+          button.refresh {{ background: #eff6ff; border-color: #60a5fa; }}
+          button.auth {{ background: #fff7ed; border-color: #fb923c; }}
           code {{ background: #eef2ff; padding: 2px 6px; border-radius: 4px; }}
         </style>
       </head>
@@ -203,13 +228,31 @@ def create_app(
 
     @app.post("/ui/bots/{bot_id}/commands/{command}")
     def queue_command_from_dashboard(bot_id: str, command: str) -> RedirectResponse:
-        allowed_commands = {"start", "stop", "restart", "status", "open_login", "login_done"}
-        if command not in allowed_commands:
+        if command not in DASHBOARD_ALLOWED_COMMANDS:
             raise HTTPException(status_code=400, detail=f"unsupported command: {command}")
         try:
             app.state.service.queue_bot_command(bot_id=bot_id, command=command, payload={})
         except KeyError as exc:
             logger.warning("queue_command_not_found bot_id=%s command=%s", bot_id, command)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/bots/{bot_id}/auth-code")
+    async def queue_submit_auth_code(bot_id: str, request: Request) -> RedirectResponse:
+        from urllib.parse import parse_qs
+
+        raw_body = (await request.body()).decode("utf-8", errors="ignore")
+        auth_code = parse_qs(raw_body).get("auth_code", [""])[0].strip()
+        if not auth_code:
+            raise HTTPException(status_code=400, detail="auth_code is required")
+        try:
+            app.state.service.queue_bot_command(
+                bot_id=bot_id,
+                command="submit_auth_code",
+                payload={"auth_code": auth_code},
+            )
+        except KeyError as exc:
+            logger.warning("queue_auth_code_not_found bot_id=%s", bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 

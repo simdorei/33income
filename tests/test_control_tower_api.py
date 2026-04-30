@@ -34,6 +34,9 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "33income Control Tower" in root.text
     assert "sender-01" in root.text
     assert "로그인 열기" in root.text
+    assert "로그인 입력" in root.text
+    assert "인증코드 제출" in root.text
+    assert "새로고침" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
 
 
@@ -73,3 +76,40 @@ def test_dashboard_can_queue_login_command(tmp_path):
     commands = polled.json()["commands"]
     assert len(commands) == 1
     assert commands[0]["command"] == "open_login"
+
+
+def test_dashboard_can_queue_auth_code_command(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/auth-code",
+        data={"auth_code": "123456"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "submit_auth_code"
+    assert "123456" in commands[0]["payload_json"]
+
+
+def test_api_submit_auth_code_response_is_masked_but_agent_poll_has_value(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "submit_auth_code", "payload": {"auth_code": "654321"}},
+    )
+
+    assert queued.status_code == 200
+    assert "654321" not in queued.text
+    assert "***" in queued.json()["payload_json"]
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert "654321" in commands[0]["payload_json"]

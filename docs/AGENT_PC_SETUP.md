@@ -37,19 +37,30 @@ ZIP 업데이트 시 기존 운영값 유지:
 
 ```text
 CONTROL_TOWER_URL=http://관제PC_IP:8330
-INCOME33_LOGIN_URL=about:blank
-INCOME33_PROFILE_ROOT=profiles
-INCOME33_LOGIN_DRY_RUN=0
 INCOME33_AGENT_PC_ID=pc-01
 INCOME33_AGENT_HOSTNAME=WIN-PC-01
 INCOME33_AGENT_IP_ADDRESS=192.168.10.101
 INCOME33_AGENT_BOT_ID=sender-01
 INCOME33_AGENT_BOT_TYPE=sender
 INCOME33_AGENT_HEARTBEAT_INTERVAL_SECONDS=30
-INCOME33_LOG_LEVEL=DEBUG
-INCOME33_LOG_DIR=logs
-INCOME33_HTTP_TIMEOUT_SECONDS=10
+
+INCOME33_LOGIN_URL=https://newta.3o3.co.kr/login?r=%2F
+INCOME33_LOGIN_ID=
+INCOME33_LOGIN_PASSWORD=
+INCOME33_PROFILE_ROOT=profiles
+INCOME33_BROWSER_DEBUG_PORT_BASE=29200
+INCOME33_BROWSER_CONTROL_DRY_RUN=0
+
+INCOME33_REFRESH_URL=https://newta.3o3.co.kr/tasks/git
+INCOME33_REFRESH_INTERVAL_SECONDS=600
+INCOME33_REFRESH_ENABLED=0
 ```
+
+### Playwright/CDP 메모
+
+- 본 구현은 **설치된 Chrome/Edge**를 `--remote-debugging-port`로 띄우고 Playwright Python이 CDP로 붙습니다.
+- Playwright Python 패키지는 필요합니다 (`pip install -r requirements.txt`).
+- `py -m playwright install chromium`은 Playwright 관리형 브라우저를 직접 쓸 때만 필요합니다.
 
 ### config/agent.yaml 방식
 
@@ -77,41 +88,40 @@ run_agent.bat
 
 agent 동작:
 
-1. bot mock 상태 tick
-2. 관제 heartbeat 전송
-3. 명령 큐 poll (`start/stop/restart/status/open_login/login_done`)
+1. bot mock 상태 tick + heartbeat
+2. 명령 큐 poll (`start/stop/restart/status/open_login/fill_login/submit_auth_code/refresh_page/login_done`)
+3. keepalive 활성화 시(`INCOME33_REFRESH_ENABLED=1`) 600초 기본 주기로 `INCOME33_REFRESH_URL` 새로고침
 4. 처리 완료 ack
 
-로그인 관제 흐름:
+## 4. NewTA 로그인 관제 흐름 (B안: 인증코드 대시보드 입력)
 
-1. 관제 웹에서 봇 행의 `로그인 열기` 클릭
-2. agent가 해당 봇 PC에서 `INCOME33_LOGIN_URL`을 브라우저로 염
-3. 브라우저는 `profiles/<bot_id>` 전용 프로필을 사용하므로 쿠키/세션이 봇별로 분리됨
-   - 서버 검증/테스트에서는 `INCOME33_LOGIN_DRY_RUN=1`로 실제 브라우저 실행 없이 launch plan만 확인 가능
-4. 사람이 봇 PC 화면 또는 원격접속으로 로그인/카카오 인증 완료
-5. 관제 웹에서 `로그인 완료` 클릭
-6. 봇 상태가 `idle`로 돌아가고 이후 시작/자동화 단계에서 같은 프로필을 재사용
+1. 관제 웹에서 `로그인 열기` 클릭
+2. agent가 해당 봇 PC에서 Chrome/Edge를 전용 프로필로 실행
+   - `--user-data-dir=profiles/<bot_id>`
+   - `--remote-debugging-port=<base+bot 매핑>`
+3. 관제 웹에서 `로그인 입력` 클릭 → agent가 `.env`의 `INCOME33_LOGIN_ID/PASSWORD`를 입력 후 로그인 클릭
+4. 인증코드 입력 화면이 뜨면 관제 웹에서 `인증코드 제출` 폼에 코드를 입력
+5. agent가 CDP로 해당 코드 입력/제출 후 대시보드 세션 유지
+6. 필요 시 `새로고침` 버튼으로 즉시 `INCOME33_REFRESH_URL` 이동
 
-## 4. 로그
+보안:
+
+- 비밀번호/인증코드는 로그/응답에 평문으로 남기지 않습니다.
+- `.env.example`은 빈 값만 제공합니다.
+
+## 5. 로그
 
 기본 로그 파일:
 
 - `logs/agent.log`
 - (단일 디버깅 실행 시) `logs/sender.log`, `logs/reporter.log`
 
-단일 디버깅:
+## 6. 초기 권장 매핑
 
-```bat
-run_sender.bat
-run_reporter.bat
-```
+- `pc-01` ~ `pc-09` → `sender-01` ~ `sender-09` (credit/estimate)
+- `pc-10` ~ `pc-18` → `reporter-01` ~ `reporter-09` (report)
 
-## 5. 초기 권장 매핑
-
-- `pc-01` ~ `pc-09` → `sender-01` ~ `sender-09`
-- `pc-10` ~ `pc-18` → `reporter-01` ~ `reporter-09`
-
-## 6. 자동 시작(후보)
+## 7. 자동 시작(후보)
 
 - 시작프로그램 폴더
 - 작업 스케줄러

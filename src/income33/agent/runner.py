@@ -4,14 +4,34 @@ import argparse
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
+from income33.agent.browser_control import (
+    fill_login,
+    is_keepalive_due,
+    is_refresh_enabled,
+    refresh_page,
+    resolve_refresh_interval_seconds,
+    submit_auth_code,
+)
 from income33.agent.client import ControlTowerClient
 from income33.agent.login import open_login_window
 from income33.bots.reporter import ReporterBotRunner
 from income33.bots.sender import SenderBotRunner
 from income33.config import AgentConfig, load_config
 from income33.logging_utils import setup_component_logger
+
+
+_KEEPALIVE_BLOCKING_STATUSES = {
+    "stopped",
+    "paused",
+    "login_required",
+    "login_opened",
+    "login_filling",
+    "login_auth_required",
+    "manual_required",
+    "crashed",
+}
 
 
 def _build_bot_runner(agent: AgentConfig):
@@ -26,11 +46,15 @@ class MockAgentRunner:
         agent: AgentConfig,
         client: ControlTowerClient,
         logger: logging.Logger | None = None,
+        monotonic_fn: Callable[[], float] | None = None,
     ) -> None:
         self.agent = agent
         self.client = client
         self.bot = _build_bot_runner(agent)
         self.logger = logger or logging.getLogger("income33.agent.runner")
+        self._monotonic = monotonic_fn or time.monotonic
+        self._last_refresh_monotonic: float | None = None
+        self._step_override: str | None = None
 
     @staticmethod
     def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
@@ -44,6 +68,44 @@ class MockAgentRunner:
         except (TypeError, json.JSONDecodeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    def _set_bot_state(self, status: str, step: str | None = None) -> None:
+        self.bot.status = status
+        self._step_override = step
+
+    def _apply_snapshot_override(self, snapshot: Any) -> Any:
+        if self._step_override:
+            snapshot.current_step = self._step_override
+            snapshot.status = self.bot.status
+            self._step_override = None
+        return snapshot
+
+    def _run_keepalive_if_due(self) -> None:
+        if not is_refresh_enabled():
+            return
+        if self.bot.status in _KEEPALIVE_BLOCKING_STATUSES:
+            return
+
+        interval = resolve_refresh_interval_seconds()
+        now = self._monotonic()
+        if not is_keepalive_due(self._last_refresh_monotonic, now, interval):
+            return
+
+        self.bot.status = "refreshing"
+        result = refresh_page(
+            bot_id=self.agent.bot_id,
+            payload={},
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._last_refresh_monotonic = now
+        self.bot.status = str(result.get("status") or "session_active")
+        self._step_override = str(result.get("current_step") or "session_refresh")
+        self.logger.info(
+            "keepalive_refreshed bot_id=%s step=%s interval=%s",
+            self.agent.bot_id,
+            self._step_override,
+            interval,
+        )
 
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
@@ -64,15 +126,50 @@ class MockAgentRunner:
             elif command_name == "restart":
                 self.bot.restart()
             elif command_name == "open_login":
-                self.bot.status = "login_required"
+                self._set_bot_state("login_required")
                 open_login_window(
                     bot_id=self.agent.bot_id,
                     payload=payload,
                     logger=logging.getLogger("income33.agent.login"),
                 )
-                self.bot.status = "login_opened"
+                self._set_bot_state("login_opened", "login_opened")
+            elif command_name == "fill_login":
+                self._set_bot_state("login_filling")
+                result = fill_login(
+                    bot_id=self.agent.bot_id,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+                self._set_bot_state(
+                    str(result.get("status") or "login_auth_required"),
+                    str(result.get("current_step") or "login_auth_required"),
+                )
+            elif command_name == "submit_auth_code":
+                auth_code = str(payload.get("auth_code") or "")
+                self._set_bot_state("manual_required")
+                result = submit_auth_code(
+                    bot_id=self.agent.bot_id,
+                    auth_code=auth_code,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+                self._set_bot_state(
+                    str(result.get("status") or "session_active"),
+                    str(result.get("current_step") or "session_active"),
+                )
+            elif command_name == "refresh_page":
+                self._set_bot_state("refreshing", "session_refresh")
+                result = refresh_page(
+                    bot_id=self.agent.bot_id,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+                self._set_bot_state(
+                    str(result.get("status") or "session_active"),
+                    str(result.get("current_step") or "session_refresh"),
+                )
             elif command_name == "login_done":
-                self.bot.status = "idle"
+                self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
             elif command_name != "status":
                 raise ValueError(f"unsupported command: {command_name}")
@@ -95,7 +192,8 @@ class MockAgentRunner:
         self.logger.debug("command_completed command_id=%s", command_id)
 
     def run_once(self) -> None:
-        snapshot = self.bot.tick()
+        self._run_keepalive_if_due()
+        snapshot = self._apply_snapshot_override(self.bot.tick())
         self.logger.debug("bot_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
 
         heartbeat_payload = {

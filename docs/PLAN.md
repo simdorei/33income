@@ -173,6 +173,10 @@ http://<관제PC_IP>:8330
   - stop
   - restart
   - status
+  - open_login
+  - fill_login
+  - submit_auth_code
+  - refresh_page
 - 실제 봇 프로세스 실행/종료
 - 로그/스크린샷 경로 보고
 
@@ -241,6 +245,11 @@ waiting
 paused
 login_required
 login_opened
+login_filling
+login_auth_required
+manual_required
+session_active
+refreshing
 stuck
 crashed
 restarting
@@ -339,8 +348,9 @@ PC/Agent 테이블
 
 주의:
 
-- `login_required` 상태는 자동재시작하지 않는다.
-- 인증이 필요한 경우 관제에서 `로그인 열기`를 눌러 해당 봇 PC의 전용 브라우저 프로필을 열고, 사람이 해당 PC 화면/원격접속으로 로그인한 뒤 `로그인 완료`를 누른다.
+- `login_required/login_auth_required/manual_required` 상태는 자동재시작하지 않는다.
+- 인증이 필요한 경우 관제에서 `로그인 열기` -> `로그인 입력` -> `인증코드 제출` 순으로 명령을 내려 해당 봇 PC의 CDP 브라우저에서 진행한다.
+- 세션 유지가 필요하면 `새로고침` 또는 주기 keepalive를 사용한다.
 
 ## 7. 데이터 저장
 
@@ -447,7 +457,7 @@ updated_at
 id
 pc_id
 bot_id
-command: start/stop/restart/status
+command: start/stop/restart/status/open_login/fill_login/submit_auth_code/refresh_page/login_done
 status: pending/running/done/failed
 payload_json
 created_at

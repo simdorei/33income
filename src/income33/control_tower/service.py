@@ -8,6 +8,14 @@ from income33.db import Database
 logger = logging.getLogger("income33.control_tower.service")
 
 
+def _sanitize_command_for_response(command: dict[str, Any]) -> dict[str, Any]:
+    if command.get("command") != "submit_auth_code":
+        return command
+    sanitized = dict(command)
+    sanitized["payload_json"] = '{"auth_code": "***"}'
+    return sanitized
+
+
 class ControlTowerService:
     def __init__(self, db: Database, mock_agent_count: int = 18) -> None:
         self.db = db
@@ -53,7 +61,7 @@ class ControlTowerService:
             command,
             queued["id"],
         )
-        return queued
+        return _sanitize_command_for_response(queued)
 
     def poll_agent_commands(self, pc_id: str, limit: int = 10) -> list[dict[str, Any]]:
         commands = self.db.poll_commands(pc_id=pc_id, limit=limit)
@@ -77,7 +85,7 @@ class ControlTowerService:
             status,
             done.get("bot_id"),
         )
-        return done
+        return _sanitize_command_for_response(done)
 
     def receive_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         record = self.db.upsert_heartbeat(payload)

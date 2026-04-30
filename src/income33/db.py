@@ -247,17 +247,21 @@ class Database:
             )
             command_id = cursor.lastrowid
 
-            mapped_status = {
-                "start": "starting",
-                "stop": "stopped",
-                "restart": "restarting",
-                "open_login": "login_required",
-                "login_done": "idle",
+            mapped_state = {
+                "start": ("starting", "starting"),
+                "stop": ("stopped", "stopped"),
+                "restart": ("restarting", "restarting"),
+                "open_login": ("login_required", "login_required"),
+                "login_done": ("idle", "idle"),
+                "fill_login": ("login_filling", "login_filling"),
+                "submit_auth_code": ("manual_required", "auth_code_queued"),
+                "refresh_page": ("refreshing", "session_refresh"),
             }.get(command)
-            if mapped_status is not None:
+            if mapped_state is not None:
+                mapped_status, mapped_step = mapped_state
                 conn.execute(
-                    "UPDATE bots SET status = ?, updated_at = ? WHERE bot_id = ?",
-                    (mapped_status, now, bot_id),
+                    "UPDATE bots SET status = ?, current_step = ?, updated_at = ? WHERE bot_id = ?",
+                    (mapped_status, mapped_step, now, bot_id),
                 )
 
             row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
@@ -318,20 +322,30 @@ class Database:
             bot_id = command_row["bot_id"]
             command = command_row["command"]
             if status == "done":
-                mapped_status = {
-                    "start": "running",
-                    "stop": "stopped",
-                    "restart": "running",
-                    "open_login": "login_opened",
-                    "login_done": "idle",
+                mapped_state = {
+                    "start": ("running", "running"),
+                    "stop": ("stopped", "stopped"),
+                    "restart": ("running", "running"),
+                    "open_login": ("login_opened", "login_opened"),
+                    "login_done": ("idle", "idle"),
+                    "fill_login": ("login_auth_required", "login_auth_required"),
+                    "submit_auth_code": ("session_active", "session_active"),
+                    "refresh_page": ("session_active", "session_refresh"),
                 }.get(command)
             else:
-                mapped_status = "crashed"
+                mapped_state = ("crashed", "command_failed")
 
-            if mapped_status:
+            if mapped_state:
+                mapped_status, mapped_step = mapped_state
                 conn.execute(
-                    "UPDATE bots SET status = ?, updated_at = ? WHERE bot_id = ?",
-                    (mapped_status, now, bot_id),
+                    "UPDATE bots SET status = ?, current_step = ?, updated_at = ? WHERE bot_id = ?",
+                    (mapped_status, mapped_step, now, bot_id),
+                )
+
+            if command == "submit_auth_code":
+                conn.execute(
+                    "UPDATE commands SET payload_json = ? WHERE id = ?",
+                    (json.dumps({"auth_code": "***"}, ensure_ascii=False), command_id),
                 )
 
             refreshed = conn.execute(

@@ -64,7 +64,7 @@ INCOME33_LOG_DIR=logs
 ### 2) 명령 큐
 
 - `POST /api/bots/{bot_id}/commands`
-  - body: `{ "command": "start|stop|restart|status|open_login|login_done", "payload": {} }`
+  - body: `{ "command": "start|stop|restart|status|open_login|fill_login|submit_auth_code|refresh_page|login_done", "payload": {} }`
 - `GET /api/agents/{pc_id}/commands/poll`
   - pending 명령을 running으로 전환해 반환
 - `POST /api/commands/{command_id}/complete`
@@ -82,8 +82,19 @@ INCOME33_LOG_DIR=logs
 - 전체 요약 (agents/bots 카운트)
 - agent 테이블
 - bot 테이블
-- bot별 버튼: `시작`, `중지`, `재시작`, `로그인 열기`, `로그인 완료`
+- bot별 버튼/폼:
+  - `시작`, `중지`, `재시작`
+  - `로그인 열기` (브라우저 실행)
+  - `로그인 입력` (ID/PW 자동 입력 후 로그인 클릭)
+  - `인증코드 제출` (관제 입력값 전달)
+  - `새로고침` (즉시 refresh URL 이동)
+  - `로그인 완료`
 
-`로그인 열기`는 관제 웹에서 직접 원격 화면을 스트리밍하는 기능이 아니라, 명령 큐를 통해 해당 봇 PC의 agent에게 브라우저를 열라고 지시합니다. agent는 `INCOME33_LOGIN_URL`을 전용 프로필(`INCOME33_PROFILE_ROOT/<bot_id>`)로 열고, 사람은 그 봇 PC 화면/원격접속에서 카카오 인증 등 수동 로그인을 완료합니다. 완료 후 관제에서 `로그인 완료`를 누르면 해당 봇을 `idle` 상태로 돌립니다. 서버/CI 검증에서는 `INCOME33_LOGIN_DRY_RUN=1`로 실제 브라우저 실행 없이 큐와 상태 전이만 확인할 수 있습니다.
+`로그인 열기`는 관제 웹에서 화면 스트리밍을 제공하는 기능이 아닙니다. 명령 큐를 통해 해당 봇 PC의 agent가 전용 프로필 브라우저를 열고, 이후 CDP를 통해 로그인 입력/인증코드 제출/새로고침 명령을 수행합니다.
+
+보안 메모:
+
+- 인증코드는 명령 payload로 전달되지만 대시보드/로그에 평문으로 재출력하지 않습니다.
+- 서버/CI 검증에서는 `INCOME33_BROWSER_CONTROL_DRY_RUN=1`로 실제 브라우저 없이 흐름 검증이 가능합니다.
 
 현재는 mock UI/JSON 확인 목적이며, 실제 업무 자동화 제어는 후속 단계입니다.
