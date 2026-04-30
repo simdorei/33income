@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
+chcp 65001 >nul 2>nul
 
 cd /d "%~dp0"
 
@@ -7,7 +8,7 @@ echo [33income] Windows setup started...
 
 where py >nul 2>nul
 if %ERRORLEVEL%==0 (
-    set "PY_CMD=py"
+    set "PY_CMD=py -3"
 ) else (
     where python >nul 2>nul
     if not %ERRORLEVEL%==0 (
@@ -27,13 +28,11 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [2/7] Upgrading pip...
-call ".venv\Scripts\activate.bat"
-if errorlevel 1 goto :fail
-python -m pip install --upgrade pip
+".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :fail
 
 echo [3/7] Installing requirements...
-pip install -r requirements.txt
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto :fail
 
 if not exist ".env" (
@@ -74,4 +73,7 @@ exit /b 0
 :fail
 echo.
 echo [FAILED] setup_windows.bat failed. Fix the message above and retry.
+echo.
+echo If this window closes too fast, run setup_windows_debug.bat and send setup_windows_debug.log.
+pause
 exit /b 1
