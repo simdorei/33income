@@ -111,7 +111,7 @@ class Database:
                 pc_id = f"pc-{index:02d}"
                 hostname = f"WIN-PC-{index:02d}"
                 ip_address = f"192.168.10.{100 + index}"
-                agent_status = "online" if index % 2 == 1 else "offline"
+                agent_status = "offline"
 
                 if index <= 9:
                     bot_type = "sender"
@@ -121,8 +121,6 @@ class Database:
                     bot_seq = index - 9
 
                 bot_id = f"{bot_type}-{bot_seq:02d}"
-                bot_status = "running" if agent_status == "online" else "idle"
-                step = "mock_cycle" if agent_status == "online" else "waiting_for_start"
 
                 conn.execute(
                     """
@@ -138,7 +136,7 @@ class Database:
                         agent_status,
                         "0.1.0",
                         bot_id,
-                        now,
+                        None,
                         now,
                     ),
                 )
@@ -155,10 +153,10 @@ class Database:
                         bot_id,
                         bot_type,
                         pc_id,
-                        bot_status,
+                        "connection_required",
                         f"profiles\\{bot_id}",
-                        now,
-                        step,
+                        None,
+                        "접속필요",
                         0,
                         0,
                         now,
@@ -252,6 +250,7 @@ class Database:
                 "stop": "stopped",
                 "restart": "restarting",
                 "open_login": "login_required",
+                "fill_login": "login_filling",
                 "login_done": "idle",
             }.get(command)
             if mapped_status is not None:
@@ -323,6 +322,7 @@ class Database:
                     "stop": "stopped",
                     "restart": "running",
                     "open_login": "login_opened",
+                    "fill_login": "login_filled",
                     "login_done": "idle",
                 }.get(command)
             else:

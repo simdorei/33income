@@ -17,6 +17,11 @@ from income33.models import CommandCompleteRequest, CommandRequest, HeartbeatReq
 setup_component_logger("income33.control_tower", "control_tower.log")
 logger = logging.getLogger("income33.control_tower.app")
 
+BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
+    ("발송 봇 01-09", "sender", 1, 9, 0),
+    ("신고 봇 01-09", "reporter", 1, 9, 9),
+]
+
 
 def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     header = "".join(f"<th>{escape(col)}</th>" for col in columns)
@@ -54,18 +59,51 @@ def _bot_actions_html(bot_id: str) -> str:
             _command_button(bot_id, "stop", "중지", "danger"),
             _command_button(bot_id, "restart", "재시작"),
             _command_button(bot_id, "open_login", "로그인 열기", "login"),
+            _command_button(bot_id, "fill_login", "로그인 입력", "login-fill"),
             _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
         ]
     )
 
 
+def _build_fixed_slot_bot_sections(raw_bots: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    bot_map = {str(bot.get("bot_id", "")): bot for bot in raw_bots}
+    sections: list[tuple[str, list[dict[str, Any]]]] = []
+
+    for section_title, bot_type, start, end, pc_offset in BOT_DISPLAY_GROUPS:
+        section_rows: list[dict[str, Any]] = []
+        for slot in range(start, end + 1):
+            bot_id = f"{bot_type}-{slot:02d}"
+            seeded = bot_map.get(bot_id)
+
+            if seeded is None:
+                row = {
+                    "bot_id": bot_id,
+                    "bot_type": bot_type,
+                    "pc_id": f"pc-{slot + pc_offset:02d}",
+                    "status": "connection_required",
+                    "current_step": "접속필요",
+                    "last_heartbeat_at": None,
+                    "success_count": 0,
+                    "failure_count": 0,
+                }
+            else:
+                row = dict(seeded)
+
+            if not row.get("last_heartbeat_at"):
+                row["current_step"] = "접속필요"
+
+            row["actions"] = _bot_actions_html(bot_id)
+            section_rows.append(row)
+
+        sections.append((section_title, section_rows))
+
+    return sections
+
+
 def _render_dashboard_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     agents = payload["agents"]
-    bots = [
-        {**bot, "actions": _bot_actions_html(str(bot.get("bot_id", "")))}
-        for bot in payload["bots"]
-    ]
+    bot_sections = _build_fixed_slot_bot_sections(payload["bots"])
 
     summary_items = "".join(
         f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>"
@@ -93,7 +131,15 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
     ]
 
     agents_html = _build_html_table(agent_columns, agents)
-    bots_html = _build_html_table(bot_columns, bots)
+    bot_sections_html = "".join(
+        (
+            "<div class='card'>"
+            f"<h2>{escape(section_title)}</h2>"
+            f"{_build_html_table(bot_columns, rows)}"
+            "</div>"
+        )
+        for section_title, rows in bot_sections
+    )
 
     return f"""
     <!doctype html>
@@ -111,6 +157,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           button {{ margin: 2px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }}
           button.danger {{ color: #b91c1c; }}
           button.login {{ background: #eef2ff; border-color: #818cf8; }}
+          button.login-fill {{ background: #fffbeb; border-color: #f59e0b; }}
           button.login-done {{ background: #ecfdf5; border-color: #34d399; }}
           code {{ background: #eef2ff; padding: 2px 6px; border-radius: 4px; }}
         </style>
@@ -130,10 +177,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           {agents_html}
         </div>
 
-        <div class='card'>
-          <h2>Bots</h2>
-          {bots_html}
-        </div>
+        {bot_sections_html}
       </body>
     </html>
     """
@@ -203,7 +247,15 @@ def create_app(
 
     @app.post("/ui/bots/{bot_id}/commands/{command}")
     def queue_command_from_dashboard(bot_id: str, command: str) -> RedirectResponse:
-        allowed_commands = {"start", "stop", "restart", "status", "open_login", "login_done"}
+        allowed_commands = {
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "open_login",
+            "fill_login",
+            "login_done",
+        }
         if command not in allowed_commands:
             raise HTTPException(status_code=400, detail=f"unsupported command: {command}")
         try:
