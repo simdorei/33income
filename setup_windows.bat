@@ -5,23 +5,31 @@ chcp 65001 >nul 2>nul
 cd /d "%~dp0"
 
 echo [33income] Windows setup started...
-
-where py >nul 2>nul
-if %ERRORLEVEL%==0 (
-    set "PY_CMD=py -3"
+call :resolve_python
+if not defined PY_CMD (
+    echo [INFO] Python was not found. Trying automatic install with winget...
+    call :try_install_python
+    if errorlevel 1 goto :fail
+    call :refresh_python_search_paths
+    call :resolve_python
+)
+if not defined PY_CMD (
+    echo [ERROR] Python install was attempted but Python is still not available.
+    echo [KO] Install Python 3.10+ manually, then re-run setup_windows.bat.
+    echo [EN] Install Python 3.10+ manually, then re-run setup_windows.bat.
+    echo [KO] 권장: winget install --id Python.Python.3.12 --exact --scope user
+    echo [EN] Suggested: winget install --id Python.Python.3.12 --exact --scope user
+    goto :fail
+)
+if defined PY_ARGS (
+    echo [INFO] Python command: "%PY_CMD%" %PY_ARGS%
 ) else (
-    where python >nul 2>nul
-    if not %ERRORLEVEL%==0 (
-        echo [ERROR] Python launcher py or python.exe was not found.
-        echo         Install Python 3.10+ from https://www.python.org/downloads/windows/
-        goto :fail
-    )
-    set "PY_CMD=python"
+    echo [INFO] Python command: "%PY_CMD%"
 )
 
 if not exist ".venv\Scripts\python.exe" (
     echo [1/7] Creating virtual environment .venv...
-    %PY_CMD% -m venv .venv
+    call :run_python -m venv .venv
     if errorlevel 1 goto :fail
 ) else (
     echo [1/7] .venv already exists. Skipping creation.
@@ -68,6 +76,77 @@ echo [OK] Setup complete.
 echo Next:
 echo   1^) run_control_tower.bat   (on control tower PC)
 echo   2^) run_agent.bat           (on each bot PC)
+exit /b 0
+
+:resolve_python
+set "PY_CMD="
+set "PY_ARGS="
+where py >nul 2>nul
+if not errorlevel 1 (
+    set "PY_CMD=py"
+    set "PY_ARGS=-3"
+    goto :eof
+)
+
+where python >nul 2>nul
+if not errorlevel 1 (
+    set "PY_CMD=python"
+    goto :eof
+)
+
+for %%P in (
+    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+) do (
+    if exist "%%~P" (
+        set "PY_CMD=%%~fP"
+        goto :eof
+    )
+)
+goto :eof
+
+:run_python
+if defined PY_ARGS (
+    "%PY_CMD%" %PY_ARGS% %*
+) else (
+    "%PY_CMD%" %*
+)
+exit /b %ERRORLEVEL%
+
+:refresh_python_search_paths
+set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%LOCALAPPDATA%\Programs\Python\Python310;%LOCALAPPDATA%\Programs\Python\Python310\Scripts;%USERPROFILE%\AppData\Local\Microsoft\WindowsApps"
+goto :eof
+
+:try_install_python
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] winget command was not found.
+    echo [KO] 자동 설치를 진행할 수 없습니다. Python 3.10+를 수동 설치하세요.
+    echo [EN] Automatic install cannot continue. Install Python 3.10+ manually.
+    echo [KO] 설치 예: https://www.python.org/downloads/windows/
+    echo [EN] Example: https://www.python.org/downloads/windows/
+    echo [KO] 또는 winget 가능 환경에서 아래 실행:
+    echo [EN] Or run this where winget is available:
+    echo         winget install --id Python.Python.3.12 --exact --scope user --accept-source-agreements --accept-package-agreements --silent
+    exit /b 1
+)
+
+echo [INFO] Running winget install for Python.Python.3.12...
+winget install --id Python.Python.3.12 --exact --scope user --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+if errorlevel 1 (
+    echo [ERROR] winget failed to install Python.Python.3.12.
+    echo [KO] 수동 설치 후 setup_windows.bat를 다시 실행하세요.
+    echo [EN] Install Python manually, then run setup_windows.bat again.
+    echo [KO] 설치 예: https://www.python.org/downloads/windows/
+    echo [EN] Example: https://www.python.org/downloads/windows/
+    echo [KO] 또는 winget 명령을 관리자 CMD에서 직접 실행해 원인을 확인하세요.
+    echo [EN] Or run winget command directly in admin CMD to inspect details.
+    echo         winget install --id Python.Python.3.12 --exact --scope user --accept-source-agreements --accept-package-agreements --silent
+    exit /b 1
+)
+
+echo [INFO] winget install completed. Re-checking Python...
 exit /b 0
 
 :fail

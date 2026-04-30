@@ -7,7 +7,9 @@
 - 운영 환경은 전부 Windows
   - 관제 PC: Windows
   - 봇 PC 18대: Windows
-- Python 3.10+ 설치 (`py` launcher 사용 가능 상태 권장)
+- Python 3.10+ 권장
+  - `setup_windows.bat`는 `py/python`이 없으면 `winget`으로 Python 자동 설치를 먼저 시도합니다.
+  - `winget` 미사용 환경이면 Python 수동 설치가 필요합니다.
 - Git for Windows 설치 (public repo clone/update 기준)
 
 ## 1. 배포 방식
@@ -43,13 +45,14 @@ setup_windows.bat
 
 `setup_windows.bat`가 수행하는 작업:
 
-1. `.venv` 생성
-2. pip 업그레이드
-3. `requirements.txt` 설치
-4. `.env` 생성(없을 때)
-5. `config/control_tower.yaml` 생성(없을 때)
-6. `config/agent.yaml` 생성(없을 때)
-7. `logs` 폴더 생성
+1. `py/python` 확인, 없으면 `winget` Python 자동 설치 시도
+2. `.venv` 생성
+3. pip 업그레이드
+4. `requirements.txt` 설치
+5. `.env` 생성(없을 때)
+6. `config/control_tower.yaml` 생성(없을 때)
+7. `config/agent.yaml` 생성(없을 때)
+8. `logs` 폴더 생성
 
 ## 2-1. 업데이트 시 데이터 보존
 

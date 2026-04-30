@@ -150,6 +150,7 @@ INCOME33_LOG_LEVEL=INFO
 `setup_windows.bat` 내부 기준:
 
 ```bat
+rem py/python 없으면 winget으로 Python 자동 설치 시도
 py -m venv .venv
 call .venv\Scripts\activate
 python -m pip install --upgrade pip
