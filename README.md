@@ -13,7 +13,7 @@
 
 ## 1) 배포 기준: Git clone/update (권장)
 
-수정/업데이트가 계속 있을 운영 PC는 **Git clone** 기준을 권장합니다. Public repo이므로 GitHub 로그인 없이 받을 수 있고, 이후에는 `git pull`로 업데이트합니다.
+수정/업데이트가 계속 있을 운영 PC는 **Git clone** 기준을 권장합니다. Public repo이므로 GitHub 로그인 없이 받을 수 있고, 이후에는 `install_or_update_33income.bat`로 최신 `origin/main`을 강제 반영합니다.
 
 ### 1-1. 최초 설치 (Windows 대상 PC)
 
@@ -68,11 +68,12 @@ install_or_update_33income.bat
 
 ```bat
 cd /d C:\33income
-git pull --ff-only
+git fetch origin main
+git reset --hard origin/main
 setup_windows.bat
 ```
 
-`.env`, `config/*.yaml`, `data/`, `logs/`, `profiles/`는 git-ignored라 업데이트해도 유지됩니다.
+`install_or_update_33income.bat`도 위와 같은 강제 업데이트 방식을 사용합니다. 로컬 tracked 코드 수정은 버리고 최신 `origin/main`으로 맞추지만, `.env`, `config/*.yaml`, `data/`, `logs/`, `profiles/`는 git-ignored라 업데이트해도 유지됩니다.
 
 ---
 

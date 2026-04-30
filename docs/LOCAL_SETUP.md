@@ -57,7 +57,8 @@ setup_windows.bat
 ## 2-1. 업데이트 시 데이터 보존
 
 - `.env`, `config/control_tower.yaml`, `config/agent.yaml`, `data/`, `logs/`, `profiles/`는 git에 올라가지 않습니다.
-- `install_or_update_33income.bat`는 `git pull --ff-only` 후 `setup_windows.bat`를 실행합니다.
+- `install_or_update_33income.bat`는 `git fetch origin main` + `git reset --hard origin/main`으로 tracked 코드를 강제 업데이트한 뒤 `setup_windows.bat`를 실행합니다.
+- 로컬 tracked 코드 수정은 버려지지만, `.env`/`config/*.yaml`/`data`/`logs`/`profiles`처럼 git-ignored인 운영 파일은 유지됩니다.
 - `setup_windows.bat`는 `.env`/`config/*.yaml`이 없을 때만 example 파일을 복사해 초기화합니다.
 
 ## 3. 관제 PC 실행

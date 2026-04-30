@@ -3,7 +3,9 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 REM 33income Windows installer/updater
 REM - Public repo clone/update helper for control-tower and bot PCs.
+REM - Force-updates tracked code with fetch/reset.
 REM - Keeps local .env, config\*.yaml, data\, logs\, profiles\ because they are git-ignored.
+REM - Warning: local tracked code edits are discarded on update.
 
 set "REPO_URL=https://github.com/simdorei/33income.git"
 set "TARGET_DIR=C:\33income"
@@ -27,20 +29,25 @@ if errorlevel 1 (
 )
 
 if exist "%TARGET_DIR%\.git" (
-    echo [1/3] Existing git checkout found. Updating...
+    echo [1/3] Existing git checkout found. Force-updating tracked code...
     git -C "%TARGET_DIR%" remote get-url origin >nul 2>nul
     if errorlevel 1 (
         echo [ERROR] %TARGET_DIR% has a .git folder but origin remote is not configured.
         exit /b 1
     )
-    git -C "%TARGET_DIR%" pull --ff-only
+    git -C "%TARGET_DIR%" fetch origin main
     if errorlevel 1 (
         echo.
-        echo [ERROR] git pull failed.
-        echo         If this PC has local code edits, back them up or reset them before updating.
-        echo         Local runtime files such as .env, data, logs, and profiles are ignored and are not the problem.
+        echo [ERROR] git fetch failed.
         exit /b 1
     )
+    git -C "%TARGET_DIR%" reset --hard origin/main
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] git reset failed.
+        exit /b 1
+    )
+    echo [INFO] Update complete. Local ignored runtime files such as .env, data, logs, and profiles are preserved.
 ) else (
     if exist "%TARGET_DIR%" (
         if exist "%TARGET_DIR%\setup_windows.bat" (

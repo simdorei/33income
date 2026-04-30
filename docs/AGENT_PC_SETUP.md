@@ -4,7 +4,7 @@
 
 ## 1. 배포/설치
 
-권장: Public GitHub repo를 `git clone`으로 받아 운영합니다. 수정/업데이트가 계속 생길 때 ZIP보다 `git pull`이 훨씬 편합니다.
+권장: Public GitHub repo를 `git clone`으로 받아 운영합니다. 수정/업데이트가 계속 생길 때 ZIP보다 clone 기반 업데이트가 훨씬 편합니다. 루트의 `install_or_update_33income.bat`는 최신 `origin/main`을 강제 반영합니다.
 
 최초 설치:
 
