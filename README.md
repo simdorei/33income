@@ -11,23 +11,42 @@
 
 ---
 
-## 1) 배포 기준: GitHub Download ZIP (권장)
+## 1) 배포 기준: Git clone/update (권장)
 
-임시 운영/현장 PC 배포는 **Git clone 없이 GitHub `Code > Download ZIP`** 흐름을 기본으로 권장합니다.
+수정/업데이트가 계속 있을 운영 PC는 **Git clone** 기준을 권장합니다. Public repo이므로 GitHub 로그인 없이 받을 수 있고, 이후에는 `git pull`로 업데이트합니다.
 
-### 1-1. ZIP 다운로드/압축 해제 (Windows 대상 PC)
+### 1-1. 최초 설치 (Windows 대상 PC)
 
-1. GitHub 레포 페이지에서 `Code > Download ZIP`
-2. ZIP을 예: `C:\33income-main`에 압축 해제
-3. 필요하면 폴더명을 `C:\33income`으로 변경
+가장 단순한 방식:
 
-### 1-2. 초기 실행
+```bat
+cd /d C:\
+git clone https://github.com/simdorei/33income.git C:\33income
+cd /d C:\33income
+setup_windows.bat
+```
+
+또는 repo 안의 통합 스크립트를 사용합니다:
+
+```bat
+cd /d C:\33income
+install_or_update_33income.bat
+```
+
+아직 `C:\33income` 폴더가 없는 PC에서 스크립트만 바로 내려받아 실행하려면 CMD에서:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/simdorei/33income/main/install_or_update_33income.bat -OutFile $env:TEMP\install_or_update_33income.bat" && "%TEMP%\install_or_update_33income.bat"
+```
+
+> Git for Windows가 먼저 설치되어 있어야 합니다: https://git-scm.com/download/win
+
+### 1-2. 실행
 
 관제 PC:
 
 ```bat
 cd /d C:\33income
-setup_windows.bat
 run_control_tower.bat
 ```
 
@@ -35,23 +54,29 @@ run_control_tower.bat
 
 ```bat
 cd /d C:\33income
-setup_windows.bat
 run_agent.bat
 ```
 
-### 1-3. ZIP 방식 업데이트 시 주의
+### 1-3. 업데이트
 
-- GitHub ZIP에는 `.env`, `data/`, `logs/`가 포함되지 않습니다.
-- `setup_windows.bat`는 `.env`와 `config/*.yaml`이 없을 때 example 파일을 복사해 초기화합니다.
-- 기존 운영값을 유지하려면 **새 ZIP을 다른 폴더에 푼 뒤** 아래를 기존 폴더에서 복사하세요.
-  - `.env`
-  - `config/control_tower.yaml`, `config/agent.yaml`
-  - `data/`
-  - `logs/`
+```bat
+cd /d C:\33income
+install_or_update_33income.bat
+```
+
+또는 수동으로:
+
+```bat
+cd /d C:\33income
+git pull --ff-only
+setup_windows.bat
+```
+
+`.env`, `config/*.yaml`, `data/`, `logs/`, `profiles/`는 git-ignored라 업데이트해도 유지됩니다.
 
 ---
 
-## 2) Windows 빠른 시작 (Git clone은 선택사항)
+## 2) Windows 빠른 시작
 
 예시 경로:
 
@@ -63,7 +88,7 @@ run_agent.bat
 ### 관제 PC (Windows)
 
 ```bat
-git clone <repo-url> C:\33income
+git clone https://github.com/simdorei/33income.git C:\33income
 cd /d C:\33income
 setup_windows.bat
 run_control_tower.bat
@@ -78,7 +103,7 @@ http://127.0.0.1:8330
 ### 봇 PC (Windows, 각 PC)
 
 ```bat
-git clone <repo-url> C:\33income
+git clone https://github.com/simdorei/33income.git C:\33income
 cd /d C:\33income
 setup_windows.bat
 run_agent.bat

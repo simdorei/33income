@@ -4,30 +4,36 @@
 
 ## 1. 배포/설치
 
-권장: GitHub 레포 페이지에서 `Code > Download ZIP`으로 받아 `C:\33income`에 압축 해제 후 실행.
+권장: Public GitHub repo를 `git clone`으로 받아 운영합니다. 수정/업데이트가 계속 생길 때 ZIP보다 `git pull`이 훨씬 편합니다.
 
-예)
-
-1. ZIP 다운로드 후 `C:\33income-main`에 압축 해제
-2. 필요 시 폴더명을 `C:\33income`으로 변경
-3. `setup_windows.bat` 실행
-
-개발 clone 방식(선택):
+최초 설치:
 
 ```bat
-git clone <repo-url> C:\33income
+cd /d C:\
+git clone https://github.com/simdorei/33income.git C:\33income
 cd /d C:\33income
 setup_windows.bat
 ```
 
-ZIP 업데이트 시 기존 운영값 유지:
+이미 repo를 받은 뒤 업데이트/재설정:
 
-- 새 ZIP은 다른 폴더에 먼저 풉니다.
-- 기존 폴더에서 아래를 복사합니다.
-  - `.env`
-  - `config/agent.yaml`
-  - `data/`
-  - `logs/`
+```bat
+cd /d C:\33income
+install_or_update_33income.bat
+```
+
+아직 `C:\33income`이 없는 PC에서 통합 스크립트만 바로 받아 실행하려면 CMD에서:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/simdorei/33income/main/install_or_update_33income.bat -OutFile $env:TEMP\install_or_update_33income.bat" && "%TEMP%\install_or_update_33income.bat"
+```
+
+> Git for Windows가 먼저 설치되어 있어야 합니다: https://git-scm.com/download/win
+
+업데이트 시 기존 운영값 유지:
+
+- `.env`, `config/agent.yaml`, `data/`, `logs/`, `profiles/`는 `.gitignore` 대상입니다.
+- `setup_windows.bat`는 기존 `.env`/설정 파일이 있으면 덮어쓰지 않습니다.
 
 ## 2. agent 설정
 

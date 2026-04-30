@@ -8,21 +8,30 @@
   - 관제 PC: Windows
   - 봇 PC 18대: Windows
 - Python 3.10+ 설치 (`py` launcher 사용 가능 상태 권장)
-- Git은 필수 아님 (자주 업데이트하는 개발자용 선택사항)
+- Git for Windows 설치 (public repo clone/update 기준)
 
 ## 1. 배포 방식
 
-### 권장: GitHub Download ZIP 배포
-
-1. GitHub 레포 페이지에서 `Code > Download ZIP`
-2. ZIP을 `C:\33income-main` 등에 압축 해제
-3. 필요하면 폴더명을 `C:\33income`으로 변경
-
-### 선택: 개발용 git clone 배포
+### 권장: Git clone/update 배포
 
 ```bat
-git clone <repo-url> C:\33income
+cd /d C:\
+git clone https://github.com/simdorei/33income.git C:\33income
 cd /d C:\33income
+setup_windows.bat
+```
+
+이미 받은 PC에서 업데이트:
+
+```bat
+cd /d C:\33income
+install_or_update_33income.bat
+```
+
+아직 `C:\33income`이 없는 PC에서 통합 스크립트를 바로 받아 실행:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing https://raw.githubusercontent.com/simdorei/33income/main/install_or_update_33income.bat -OutFile $env:TEMP\install_or_update_33income.bat" && "%TEMP%\install_or_update_33income.bat"
 ```
 
 ## 2. 초기 세팅
@@ -42,16 +51,11 @@ setup_windows.bat
 6. `config/agent.yaml` 생성(없을 때)
 7. `logs` 폴더 생성
 
-## 2-1. ZIP 업데이트 시 데이터 보존
+## 2-1. 업데이트 시 데이터 보존
 
-- GitHub ZIP에는 `.env`, `data/`, `logs/`가 포함되지 않습니다.
-- 기존 운영값을 유지하려면 **새 ZIP을 다른 폴더에 풀고**, 아래를 기존 폴더에서 복사하세요.
-  - `.env`
-  - `config/control_tower.yaml`, `config/agent.yaml`
-  - `data/`
-  - `logs/`
-
-`setup_windows.bat`는 `.env`/`config/*.yaml`이 없을 때 example 파일을 복사해 초기화합니다.
+- `.env`, `config/control_tower.yaml`, `config/agent.yaml`, `data/`, `logs/`, `profiles/`는 git에 올라가지 않습니다.
+- `install_or_update_33income.bat`는 `git pull --ff-only` 후 `setup_windows.bat`를 실행합니다.
+- `setup_windows.bat`는 `.env`/`config/*.yaml`이 없을 때만 example 파일을 복사해 초기화합니다.
 
 ## 3. 관제 PC 실행
 

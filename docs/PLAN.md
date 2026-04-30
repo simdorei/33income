@@ -91,9 +91,17 @@ PC-10 ~ PC-18   → reporter-01 ~ reporter-09
 초기 사용자는 아래 정도만 수행하도록 만든다.
 
 ```bat
-git clone <repo-url>
-cd 33income
+cd /d C:\
+git clone https://github.com/simdorei/33income.git C:\33income
+cd /d C:\33income
 setup_windows.bat
+```
+
+업데이트는 아래 통합 스크립트를 사용한다.
+
+```bat
+cd /d C:\33income
+install_or_update_33income.bat
 ```
 
 중앙 관제 PC:
@@ -120,7 +128,8 @@ run_reporter.bat
 ```text
 .venv/                  # git 제외
 requirements.txt
-setup_windows.bat       # venv 생성 + 패키지 설치
+setup_windows.bat       # venv 생성 + 패키지 설치 + .env/config/logs 초기화
+install_or_update_33income.bat # git clone/pull + setup_windows.bat 실행
 run_control_tower.bat   # 중앙 관제 웹페이지 실행
 run_agent.bat           # 각 봇 PC local agent 실행
 run_sender.bat          # 단일 발송봇 디버깅용
@@ -134,7 +143,9 @@ run_reporter.bat        # 단일 신고봇 디버깅용
 1. `.venv` 없으면 생성
 2. pip 업그레이드
 3. `requirements.txt` 설치
-4. Playwright 사용 시 브라우저 엔진 설치
+4. `.env` 생성(없을 때)
+5. `config/control_tower.yaml`, `config/agent.yaml` 생성(없을 때)
+6. `logs` 폴더 생성
 
 ## 4. 구성 요소
 
