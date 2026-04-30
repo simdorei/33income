@@ -12,12 +12,13 @@ BotStatus = Literal[
     "waiting",
     "paused",
     "login_required",
+    "login_opened",
     "stuck",
     "crashed",
     "restarting",
     "stopped",
 ]
-CommandType = Literal["start", "stop", "restart", "status"]
+CommandType = Literal["start", "stop", "restart", "status", "open_login", "login_done"]
 CommandStatus = Literal["pending", "running", "done", "failed"]
 
 

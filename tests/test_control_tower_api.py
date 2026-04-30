@@ -33,6 +33,8 @@ def test_summary_and_root_dashboard(tmp_path):
     assert root.status_code == 200
     assert "33income Control Tower" in root.text
     assert "sender-01" in root.text
+    assert "로그인 열기" in root.text
+    assert "/ui/bots/sender-01/commands/open_login" in root.text
 
 
 def test_queue_poll_and_complete_command(tmp_path):
@@ -55,3 +57,19 @@ def test_queue_poll_and_complete_command(tmp_path):
     complete = client.post(f"/api/commands/{command_id}/complete", json={"status": "done"})
     assert complete.status_code == 200
     assert complete.json()["status"] == "done"
+
+
+def test_dashboard_can_queue_login_command(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/commands/open_login",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "open_login"

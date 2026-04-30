@@ -36,8 +36,8 @@ class BaseBotRunner:
         self.status = "running"
 
     def tick(self) -> BotSnapshot:
-        if self.status == "stopped":
-            current_step = "stopped"
+        if self.status in {"stopped", "idle", "login_required", "login_opened", "paused"}:
+            current_step = self.status
         else:
             if not self._steps:
                 current_step = "idle"

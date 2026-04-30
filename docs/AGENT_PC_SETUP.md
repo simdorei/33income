@@ -37,6 +37,9 @@ ZIP 업데이트 시 기존 운영값 유지:
 
 ```text
 CONTROL_TOWER_URL=http://관제PC_IP:8330
+INCOME33_LOGIN_URL=about:blank
+INCOME33_PROFILE_ROOT=profiles
+INCOME33_LOGIN_DRY_RUN=0
 INCOME33_AGENT_PC_ID=pc-01
 INCOME33_AGENT_HOSTNAME=WIN-PC-01
 INCOME33_AGENT_IP_ADDRESS=192.168.10.101
@@ -76,8 +79,18 @@ agent 동작:
 
 1. bot mock 상태 tick
 2. 관제 heartbeat 전송
-3. 명령 큐 poll (`start/stop/restart/status`)
+3. 명령 큐 poll (`start/stop/restart/status/open_login/login_done`)
 4. 처리 완료 ack
+
+로그인 관제 흐름:
+
+1. 관제 웹에서 봇 행의 `로그인 열기` 클릭
+2. agent가 해당 봇 PC에서 `INCOME33_LOGIN_URL`을 브라우저로 염
+3. 브라우저는 `profiles/<bot_id>` 전용 프로필을 사용하므로 쿠키/세션이 봇별로 분리됨
+   - 서버 검증/테스트에서는 `INCOME33_LOGIN_DRY_RUN=1`로 실제 브라우저 실행 없이 launch plan만 확인 가능
+4. 사람이 봇 PC 화면 또는 원격접속으로 로그인/카카오 인증 완료
+5. 관제 웹에서 `로그인 완료` 클릭
+6. 봇 상태가 `idle`로 돌아가고 이후 시작/자동화 단계에서 같은 프로필을 재사용
 
 ## 4. 로그
 

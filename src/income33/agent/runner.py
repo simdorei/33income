@@ -4,8 +4,10 @@ import argparse
 import json
 import logging
 import time
+from typing import Any
 
 from income33.agent.client import ControlTowerClient
+from income33.agent.login import open_login_window
 from income33.bots.reporter import ReporterBotRunner
 from income33.bots.sender import SenderBotRunner
 from income33.config import AgentConfig, load_config
@@ -29,6 +31,68 @@ class MockAgentRunner:
         self.client = client
         self.bot = _build_bot_runner(agent)
         self.logger = logger or logging.getLogger("income33.agent.runner")
+
+    @staticmethod
+    def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
+        raw_payload = command.get("payload_json")
+        if not raw_payload:
+            return {}
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        try:
+            parsed = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _handle_command(self, command: dict[str, Any]) -> None:
+        command_name = command["command"]
+        command_id = command["id"]
+        payload = self._command_payload(command)
+        self.logger.info(
+            "command_received command_id=%s command=%s bot_id=%s",
+            command_id,
+            command_name,
+            self.agent.bot_id,
+        )
+
+        try:
+            if command_name == "start":
+                self.bot.start()
+            elif command_name == "stop":
+                self.bot.stop()
+            elif command_name == "restart":
+                self.bot.restart()
+            elif command_name == "open_login":
+                self.bot.status = "login_required"
+                open_login_window(
+                    bot_id=self.agent.bot_id,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.login"),
+                )
+                self.bot.status = "login_opened"
+            elif command_name == "login_done":
+                self.bot.status = "idle"
+                self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
+            elif command_name != "status":
+                raise ValueError(f"unsupported command: {command_name}")
+            # status command is heartbeat-only
+        except Exception as exc:
+            self.client.complete_command(
+                command_id=command_id,
+                status="failed",
+                error_message=str(exc),
+            )
+            self.logger.exception(
+                "command_failed command_id=%s command=%s bot_id=%s",
+                command_id,
+                command_name,
+                self.agent.bot_id,
+            )
+            return
+
+        self.client.complete_command(command_id=command_id, status="done")
+        self.logger.debug("command_completed command_id=%s", command_id)
 
     def run_once(self) -> None:
         snapshot = self.bot.tick()
@@ -58,25 +122,7 @@ class MockAgentRunner:
         self.logger.debug("polled_commands count=%s pc_id=%s", len(commands), self.agent.pc_id)
 
         for command in commands:
-            command_name = command["command"]
-            command_id = command["id"]
-            self.logger.info(
-                "command_received command_id=%s command=%s bot_id=%s",
-                command_id,
-                command_name,
-                self.agent.bot_id,
-            )
-
-            if command_name == "start":
-                self.bot.start()
-            elif command_name == "stop":
-                self.bot.stop()
-            elif command_name == "restart":
-                self.bot.restart()
-            # status command is heartbeat-only
-
-            self.client.complete_command(command_id=command_id, status="done")
-            self.logger.debug("command_completed command_id=%s", command_id)
+            self._handle_command(command)
 
     def run_forever(self) -> None:
         interval = max(1, int(self.agent.heartbeat_interval_seconds))

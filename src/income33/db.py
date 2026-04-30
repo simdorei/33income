@@ -251,6 +251,8 @@ class Database:
                 "start": "starting",
                 "stop": "stopped",
                 "restart": "restarting",
+                "open_login": "login_required",
+                "login_done": "idle",
             }.get(command)
             if mapped_status is not None:
                 conn.execute(
@@ -320,6 +322,8 @@ class Database:
                     "start": "running",
                     "stop": "stopped",
                     "restart": "running",
+                    "open_login": "login_opened",
+                    "login_done": "idle",
                 }.get(command)
             else:
                 mapped_status = "crashed"

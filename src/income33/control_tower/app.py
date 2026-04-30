@@ -6,7 +6,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from income33.config import AppConfig, load_config
 from income33.control_tower.service import ControlTowerService
@@ -23,7 +23,10 @@ def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     body_parts: list[str] = []
     for row in rows:
         cells = "".join(
-            f"<td>{escape(str(row.get(col, '')))}</td>" for col in columns
+            f"<td>{row.get(col, '')}</td>"
+            if col == "actions"
+            else f"<td>{escape(str(row.get(col, '')))}</td>"
+            for col in columns
         )
         body_parts.append(f"<tr>{cells}</tr>")
 
@@ -31,10 +34,38 @@ def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     return f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _command_button(bot_id: str, command: str, label: str, css_class: str = "") -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    safe_command = escape(command, quote=True)
+    safe_label = escape(label)
+    safe_class = escape(css_class, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/commands/{safe_command}' "
+        "style='display:inline'>"
+        f"<button class='{safe_class}' type='submit'>{safe_label}</button>"
+        "</form>"
+    )
+
+
+def _bot_actions_html(bot_id: str) -> str:
+    return " ".join(
+        [
+            _command_button(bot_id, "start", "시작"),
+            _command_button(bot_id, "stop", "중지", "danger"),
+            _command_button(bot_id, "restart", "재시작"),
+            _command_button(bot_id, "open_login", "로그인 열기", "login"),
+            _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
+        ]
+    )
+
+
 def _render_dashboard_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     agents = payload["agents"]
-    bots = payload["bots"]
+    bots = [
+        {**bot, "actions": _bot_actions_html(str(bot.get("bot_id", "")))}
+        for bot in payload["bots"]
+    ]
 
     summary_items = "".join(
         f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>"
@@ -58,6 +89,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
         "last_heartbeat_at",
         "success_count",
         "failure_count",
+        "actions",
     ]
 
     agents_html = _build_html_table(agent_columns, agents)
@@ -76,6 +108,10 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
           th, td {{ border: 1px solid #e5e7eb; padding: 8px; text-align: left; }}
           th {{ background: #f3f4f6; }}
+          button {{ margin: 2px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }}
+          button.danger {{ color: #b91c1c; }}
+          button.login {{ background: #eef2ff; border-color: #818cf8; }}
+          button.login-done {{ background: #ecfdf5; border-color: #34d399; }}
           code {{ background: #eef2ff; padding: 2px 6px; border-radius: 4px; }}
         </style>
       </head>
@@ -164,6 +200,18 @@ def create_app(
             logger.warning("queue_command_not_found bot_id=%s", bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return command
+
+    @app.post("/ui/bots/{bot_id}/commands/{command}")
+    def queue_command_from_dashboard(bot_id: str, command: str) -> RedirectResponse:
+        allowed_commands = {"start", "stop", "restart", "status", "open_login", "login_done"}
+        if command not in allowed_commands:
+            raise HTTPException(status_code=400, detail=f"unsupported command: {command}")
+        try:
+            app.state.service.queue_bot_command(bot_id=bot_id, command=command, payload={})
+        except KeyError as exc:
+            logger.warning("queue_command_not_found bot_id=%s command=%s", bot_id, command)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/agents/{pc_id}/commands/poll")
     def poll_agent_commands(

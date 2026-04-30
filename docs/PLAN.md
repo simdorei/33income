@@ -240,6 +240,7 @@ running
 waiting
 paused
 login_required
+login_opened
 stuck
 crashed
 restarting
@@ -339,7 +340,7 @@ PC/Agent 테이블
 주의:
 
 - `login_required` 상태는 자동재시작하지 않는다.
-- 인증이 필요한 경우 사람이 해당 PC에서 로그인한 뒤 다시 시작한다.
+- 인증이 필요한 경우 관제에서 `로그인 열기`를 눌러 해당 봇 PC의 전용 브라우저 프로필을 열고, 사람이 해당 PC 화면/원격접속으로 로그인한 뒤 `로그인 완료`를 누른다.
 
 ## 7. 데이터 저장
 

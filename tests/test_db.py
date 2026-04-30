@@ -24,9 +24,13 @@ def test_enqueue_and_poll_commands(tmp_path):
     db.init_db()
     db.seed_mock_data(agent_count=18)
 
-    command = db.enqueue_command(pc_id="pc-01", bot_id="sender-01", command="restart")
+    command = db.enqueue_command(pc_id="pc-01", bot_id="sender-01", command="open_login")
 
     assert command["status"] == "pending"
+
+    bot = db.get_bot("sender-01")
+    assert bot is not None
+    assert bot["status"] == "login_required"
 
     polled = db.poll_commands(pc_id="pc-01", limit=5)
     assert len(polled) == 1
@@ -35,3 +39,7 @@ def test_enqueue_and_poll_commands(tmp_path):
 
     done = db.complete_command(command_id=command["id"], status="done")
     assert done["status"] == "done"
+
+    bot = db.get_bot("sender-01")
+    assert bot is not None
+    assert bot["status"] == "login_opened"
