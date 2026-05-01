@@ -174,6 +174,88 @@ def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
     assert result["tax_doc_ids"] == [11, 12]
 
 
+def test_send_expected_tax_amounts_skips_collected_excluded_tax_doc_ids(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "content": [{"taxDocId": 11}, {"taxDocId": 12}, {"taxDocId": 13}],
+                        "totalElements": 3,
+                        "totalPages": 1,
+                    },
+                },
+            }
+        assert url.endswith("/api/tax/v1/taxdocs/expected-tax-amount/send")
+        assert method == "POST"
+        assert json_body == {"taxDocIdSet": [13]}
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"year": 2025, "size": 20, "exclude_tax_doc_ids": [11, 12]},
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    assert result["sent_count"] == 1
+    assert result["skipped_count"] == 2
+    assert result["tax_doc_ids"] == [13]
+
+
+def test_send_expected_tax_amounts_does_not_post_when_only_excluded_targets_remain(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "content": [{"taxDocId": 11}, {"taxDocId": 12}],
+                        "totalElements": 2,
+                        "totalPages": 1,
+                    },
+                },
+            }
+        raise AssertionError("excluded-only repeat should not POST")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"year": 2025, "size": 20, "exclude_tax_doc_ids": [11, 12]},
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET"]
+    assert result["sent_count"] == 0
+    assert result["skipped_count"] == 2
+    assert result["tax_doc_ids"] == []
+    assert result["current_step"] == "계산발송 신규 0건 제외 2건"
+
+
 def test_send_expected_tax_amounts_rejects_invalid_tax_doc_ids(monkeypatch):
     monkeypatch.setenv("INCOME33_BROWSER_CONTROL_DRY_RUN", "1")
 

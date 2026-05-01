@@ -746,21 +746,37 @@ def preview_expected_tax_send_targets(
     return result
 
 
-def _tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
-    raw_ids = payload.get("tax_doc_ids") or payload.get("taxDocIds") or payload.get("taxDocIdSet") or []
+def _tax_doc_ids_from_raw(raw_ids: Any, *, field_name: str = "tax_doc_ids") -> list[int]:
     if isinstance(raw_ids, str):
         raw_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
+    if raw_ids in (None, ""):
+        raw_ids = []
     if not isinstance(raw_ids, list):
-        raise ValueError("tax_doc_ids must be a list or comma-separated string")
+        raise ValueError(f"{field_name} must be a list or comma-separated string")
     tax_doc_ids: list[int] = []
     for raw_id in raw_ids:
         if isinstance(raw_id, bool):
-            raise ValueError("tax_doc_ids must contain positive integers")
+            raise ValueError(f"{field_name} must contain positive integers")
         tax_doc_id = int(raw_id)
         if tax_doc_id <= 0:
-            raise ValueError("tax_doc_ids must contain positive integers")
+            raise ValueError(f"{field_name} must contain positive integers")
         tax_doc_ids.append(tax_doc_id)
     return list(dict.fromkeys(tax_doc_ids))
+
+
+def _tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
+    raw_ids = payload.get("tax_doc_ids") or payload.get("taxDocIds") or payload.get("taxDocIdSet") or []
+    return _tax_doc_ids_from_raw(raw_ids, field_name="tax_doc_ids")
+
+
+def _excluded_tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
+    raw_ids = (
+        payload.get("exclude_tax_doc_ids")
+        or payload.get("excludeTaxDocIds")
+        or payload.get("excludeTaxDocIdSet")
+        or []
+    )
+    return _tax_doc_ids_from_raw(raw_ids, field_name="exclude_tax_doc_ids")
 
 
 def send_expected_tax_amounts(
@@ -772,28 +788,47 @@ def send_expected_tax_amounts(
     logger = logger or logging.getLogger("income33.agent.browser_control")
     payload = payload or {}
     requested_tax_doc_ids = _tax_doc_ids_from_payload(payload)
+    excluded_tax_doc_ids = set(_excluded_tax_doc_ids_from_payload(payload))
+    skipped_count = 0
 
     if is_browser_control_dry_run(payload):
         if requested_tax_doc_ids:
             dry_run_count = len(requested_tax_doc_ids)
         else:
             preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
-            dry_run_count = int(preview.get("count") or 0)
+            preview_tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+            skipped_count = len([tax_doc_id for tax_doc_id in preview_tax_doc_ids if tax_doc_id in excluded_tax_doc_ids])
+            dry_run_count = len([tax_doc_id for tax_doc_id in preview_tax_doc_ids if tax_doc_id not in excluded_tax_doc_ids])
+            if not preview_tax_doc_ids:
+                dry_run_count = int(preview.get("count") or 0)
         return {
             "ok": True,
             "dry_run": True,
             "status": "session_active",
             "current_step": f"계산발송 dry-run {dry_run_count}건",
             "sent_count": dry_run_count,
+            "skipped_count": skipped_count,
             "tax_doc_ids": requested_tax_doc_ids,
         }
 
     tax_doc_ids = requested_tax_doc_ids
     if not tax_doc_ids:
         preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
-        tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+        preview_tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+        skipped_count = len([tax_doc_id for tax_doc_id in preview_tax_doc_ids if tax_doc_id in excluded_tax_doc_ids])
+        tax_doc_ids = [tax_doc_id for tax_doc_id in preview_tax_doc_ids if tax_doc_id not in excluded_tax_doc_ids]
 
     if not tax_doc_ids:
+        if skipped_count:
+            return {
+                "ok": True,
+                "dry_run": False,
+                "status": "session_active",
+                "current_step": f"계산발송 신규 0건 제외 {skipped_count}건",
+                "sent_count": 0,
+                "skipped_count": skipped_count,
+                "tax_doc_ids": [],
+            }
         raise RuntimeError("no taxDocId values to send")
 
     api_base_url = _resolve_tax_api_base_url(payload)
@@ -828,6 +863,7 @@ def send_expected_tax_amounts(
             "debug_port": debug_port,
             "status_code": send_response.get("status"),
             "sent_count": len(tax_doc_ids),
+            "skipped_count": skipped_count,
             "tax_doc_ids": tax_doc_ids,
         }
 
