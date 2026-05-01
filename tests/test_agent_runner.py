@@ -168,6 +168,41 @@ def test_runner_handles_preview_send_targets_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "목록조회 테스트 20/274건 현재 1/14페이지 총 14페이지 officeId=325"
 
 
+def test_preview_result_survives_next_idle_heartbeat(monkeypatch):
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        return {
+            "status": "session_active",
+            "current_step": "목록조회 테스트 20/565건 현재 1/29페이지 총 29페이지 officeId=325",
+        }
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        return {"status": "session_active", "current_step": "session_active"}
+
+    monkeypatch.setattr(
+        "income33.agent.runner.preview_expected_tax_send_targets",
+        fake_preview_expected_tax_send_targets,
+    )
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    runner, client = build_runner(
+        [
+            {
+                "id": 13,
+                "command": "preview_send_targets",
+                "payload_json": json.dumps({"year": 2025, "size": 20}),
+            }
+        ]
+    )
+
+    runner.run_once()
+    runner.run_once()
+
+    assert client.heartbeats[-1]["bot_status"] == "session_active"
+    assert (
+        client.heartbeats[-1]["current_step"]
+        == "목록조회 테스트 20/565건 현재 1/29페이지 총 29페이지 officeId=325"
+    )
+
+
 def test_runner_handles_login_done_command():
     runner, client = build_runner([{"id": 8, "command": "login_done", "payload_json": "{}"}])
 

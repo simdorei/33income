@@ -65,6 +65,7 @@ class AgentRunner:
         self._monotonic = monotonic_fn or time.monotonic
         self._last_refresh_monotonic: float | None = None
         self._step_override: str | None = None
+        self._persistent_step: str | None = None
 
     @staticmethod
     def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
@@ -80,12 +81,25 @@ class AgentRunner:
         return parsed if isinstance(parsed, dict) else {}
 
     def _set_bot_state(self, status: str, step: str | None = None) -> None:
+        previous_status = self.bot.status
         self.bot.status = status
+        if step is None:
+            if status != previous_status:
+                self._persistent_step = None
+            self._step_override = self._persistent_step
+            return
+
+        if step == status and status == previous_status and self._persistent_step:
+            self._step_override = self._persistent_step
+            return
+
+        self._persistent_step = step
         self._step_override = step
 
     def _apply_snapshot_override(self, snapshot: Any) -> Any:
-        if self._step_override:
-            snapshot.current_step = self._step_override
+        step = self._step_override or self._persistent_step
+        if step:
+            snapshot.current_step = step
             snapshot.status = self.bot.status
             self._step_override = None
         return snapshot
@@ -144,15 +158,17 @@ class AgentRunner:
         if not is_keepalive_due(self._last_refresh_monotonic, now, interval):
             return
 
-        self.bot.status = "refreshing"
+        self._set_bot_state("refreshing", "session_refresh")
         result = refresh_page(
             bot_id=self.agent.bot_id,
             payload={},
             logger=logging.getLogger("income33.agent.browser_control"),
         )
         self._last_refresh_monotonic = now
-        self.bot.status = str(result.get("status") or "session_active")
-        self._step_override = str(result.get("current_step") or "session_refresh")
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "session_refresh"),
+        )
         self.logger.info(
             "keepalive_refreshed bot_id=%s step=%s interval=%s",
             self.agent.bot_id,
@@ -174,10 +190,13 @@ class AgentRunner:
         try:
             if command_name == "start":
                 self.bot.start()
+                self._set_bot_state(self.bot.status)
             elif command_name == "stop":
                 self.bot.stop()
+                self._set_bot_state(self.bot.status)
             elif command_name == "restart":
                 self.bot.restart()
+                self._set_bot_state(self.bot.status)
             elif command_name == "open_login":
                 self._set_bot_state("login_required")
                 open_login_window(
