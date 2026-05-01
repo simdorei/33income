@@ -174,6 +174,42 @@ def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
     assert result["tax_doc_ids"] == [11, 12]
 
 
+def test_send_expected_tax_amounts_keeps_session_active_when_collected_targets_are_empty(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+        assert "/api/tax/v1/taxdocs/filter-search" in url
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "content": [],
+                    "totalElements": 0,
+                    "totalPages": 1,
+                },
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_expected_tax_amounts(bot_id="sender-01", payload={"year": 2025, "size": 20})
+
+    assert [call["method"] for call in calls] == ["GET", "GET"]
+    assert result["status"] == "session_active"
+    assert result["sent_count"] == 0
+    assert result["tax_doc_ids"] == []
+    assert result["current_step"] == "계산발송 대상 없음"
+
+
 def test_assign_taxdocs_to_current_accountant_fetches_me_then_puts_assignment(monkeypatch):
     calls = []
 

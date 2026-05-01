@@ -386,6 +386,49 @@ def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypa
     assert client.heartbeats[-1]["current_step"] == "잔여목록 배정 완료 1건 담당자=817 status=200 / 다음발송 300초 후"
 
 
+def test_runner_keeps_repeating_after_leftover_assignment(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0, 1300.0, 1600.0, 1600.0, 1900.0, 1900.0])
+    send_calls = []
+    assign_calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": f"계산발송 완료 #{len(send_calls)}", "tax_doc_ids": [555]}
+
+    def fake_assign_taxdocs_to_current_accountant(*, bot_id, tax_doc_ids, payload, logger):
+        assign_calls.append({"bot_id": bot_id, "tax_doc_ids": tax_doc_ids, "payload": payload})
+        return {"status": "session_active", "current_step": "잔여목록 배정 완료 1건 담당자=817 status=200"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    monkeypatch.setattr(
+        "income33.agent.runner.assign_taxdocs_to_current_accountant",
+        fake_assign_taxdocs_to_current_accountant,
+    )
+    runner, client = build_runner(
+        [
+            {
+                "id": 23,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "size": 20}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+    runner.run_once()
+    runner.run_once()
+
+    assert len(send_calls) == 4
+    assert assign_calls == [{"bot_id": "sender-01", "tax_doc_ids": [555], "payload": {"year": 2025, "size": 20}}]
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #4 / 다음발송 300초 후"
+
+
 def test_runner_cancels_repeated_send_when_operator_queues_control_command(monkeypatch):
     monotonic_points = iter([1000.0, 1300.0])
     calls = []

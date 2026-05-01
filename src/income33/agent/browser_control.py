@@ -798,7 +798,14 @@ def send_expected_tax_amounts(
         tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
 
     if not tax_doc_ids:
-        raise RuntimeError("no taxDocId values to send")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": "계산발송 대상 없음",
+            "sent_count": 0,
+            "tax_doc_ids": [],
+        }
 
     api_base_url = _resolve_tax_api_base_url(payload)
     web_path = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/tasks/git")
