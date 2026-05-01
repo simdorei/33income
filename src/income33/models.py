@@ -34,6 +34,7 @@ CommandType = Literal[
     "submit_auth_code",
     "refresh_page",
     "preview_send_targets",
+    "send_expected_tax_amounts",
 ]
 CommandStatus = Literal["pending", "running", "done", "failed"]
 

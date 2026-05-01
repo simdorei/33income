@@ -168,6 +168,104 @@ def test_runner_handles_preview_send_targets_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "목록조회 테스트 20/274건 현재 1/14페이지 총 14페이지 officeId=325"
 
 
+def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
+    calls = []
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": "계산발송 완료 9건 status=200",
+        }
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [
+            {
+                "id": 14,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"tax_doc_ids": [1360165, 1360211]}),
+            }
+        ]
+    )
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_ids": [1360165, 1360211]}}]
+    assert client.completed == [{"command_id": 14, "status": "done", "error_message": None}]
+    assert runner.bot.status == "session_active"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
+
+
+def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
+    monotonic_points = iter([1000.0, 1299.0, 1300.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": f"계산발송 완료 #{len(calls)}",
+        }
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [
+            {
+                "id": 15,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "size": 20}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+    runner.run_once()
+
+    assert calls == [
+        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
+        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
+    ]
+    assert client.completed == [{"command_id": 15, "status": "done", "error_message": None}]
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2"
+
+
+def test_runner_cancels_repeated_send_when_operator_queues_control_command(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "계산발송 완료"}
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [
+            {"id": 16, "command": "send_expected_tax_amounts", "payload_json": "{}"},
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    client.commands = [{"id": 17, "command": "stop", "payload_json": "{}"}]
+    runner.run_once()
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {}}]
+    assert client.completed == [
+        {"command_id": 16, "status": "done", "error_message": None},
+        {"command_id": 17, "status": "done", "error_message": None},
+    ]
+
+
 def test_preview_result_survives_next_idle_heartbeat(monkeypatch):
     def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
         return {

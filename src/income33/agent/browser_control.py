@@ -578,15 +578,27 @@ def _taxdoc_filter_search_url(
     return f"{api_base_url}/api/tax/v1/taxdocs/filter-search?{urlencode(params)}"
 
 
-def _browser_fetch_json(page: Any, *, url: str, method: str = "GET", headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _browser_fetch_json(
+    page: Any,
+    *,
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return page.evaluate(
         """
-        async ({url, method, headers}) => {
-          const response = await fetch(url, {
+        async ({url, method, headers, jsonBody}) => {
+          const request = {
             method,
-            headers,
+            headers: {...headers},
             credentials: 'include',
-          });
+          };
+          if (jsonBody !== null && jsonBody !== undefined) {
+            request.headers['content-type'] = request.headers['content-type'] || 'application/json';
+            request.body = JSON.stringify(jsonBody);
+          }
+          const response = await fetch(url, request);
           const text = await response.text();
           let json = null;
           try { json = text ? JSON.parse(text) : null; } catch (e) {}
@@ -599,7 +611,7 @@ def _browser_fetch_json(page: Any, *, url: str, method: str = "GET", headers: di
           };
         }
         """,
-        {"url": url, "method": method, "headers": headers or {}},
+        {"url": url, "method": method, "headers": headers or {}, "jsonBody": json_body},
     )
 
 
@@ -730,6 +742,94 @@ def preview_expected_tax_send_targets(
         result.get("page"),
         result.get("count"),
         result.get("total_elements"),
+    )
+    return result
+
+
+def _tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
+    raw_ids = payload.get("tax_doc_ids") or payload.get("taxDocIds") or payload.get("taxDocIdSet") or []
+    if isinstance(raw_ids, str):
+        raw_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
+    if not isinstance(raw_ids, list):
+        raise ValueError("tax_doc_ids must be a list or comma-separated string")
+    tax_doc_ids = [int(tax_doc_id) for tax_doc_id in raw_ids]
+    return list(dict.fromkeys(tax_doc_ids))
+
+
+def send_expected_tax_amounts(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    requested_tax_doc_ids = _tax_doc_ids_from_payload(payload)
+
+    if is_browser_control_dry_run(payload):
+        if requested_tax_doc_ids:
+            dry_run_count = len(requested_tax_doc_ids)
+        else:
+            preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
+            dry_run_count = int(preview.get("count") or 0)
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"계산발송 dry-run {dry_run_count}건",
+            "sent_count": dry_run_count,
+            "tax_doc_ids": requested_tax_doc_ids,
+        }
+
+    tax_doc_ids = requested_tax_doc_ids
+    if not tax_doc_ids:
+        preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
+        tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+
+    if not tax_doc_ids:
+        raise RuntimeError("no taxDocId values to send")
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    web_path = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/tasks/git")
+    send_url = f"{api_base_url}/api/tax/v1/taxdocs/expected-tax-amount/send"
+    request_body = {"taxDocIdSet": tax_doc_ids}
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": web_path,
+    }
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(web_path, wait_until="domcontentloaded")
+        send_response = _browser_fetch_json(
+            page,
+            url=send_url,
+            method="POST",
+            headers=headers,
+            json_body=request_body,
+        )
+        send_json = send_response.get("json") or {}
+        result_data = send_json.get("data") or {}
+        if not send_response.get("ok") or not send_json.get("ok") or result_data.get("result") is not True:
+            raise RuntimeError(f"expected tax amount send failed status={send_response.get('status')}")
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": f"계산발송 완료 {len(tax_doc_ids)}건 status={send_response.get('status')}",
+            "debug_port": debug_port,
+            "status_code": send_response.get("status"),
+            "sent_count": len(tax_doc_ids),
+            "tax_doc_ids": tax_doc_ids,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s",
+        bot_id,
+        result.get("sent_count"),
+        result.get("status_code"),
     )
     return result
 

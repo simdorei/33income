@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from income33.agent.browser_control import (
     preview_expected_tax_send_targets,
     refresh_page,
     resolve_refresh_interval_seconds,
+    send_expected_tax_amounts,
     submit_auth_code,
 )
 from income33.agent.client import ControlTowerClient
@@ -44,6 +46,14 @@ _LOGIN_STATE_PROBE_STATUSES = {
 }
 
 
+def _resolve_send_repeat_interval_seconds() -> int:
+    raw_value = os.getenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", "300")
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return 300
+
+
 def _build_bot_runner(agent: AgentConfig):
     if agent.bot_type == "reporter":
         return ReporterBotRunner(bot_id=agent.bot_id)
@@ -66,6 +76,8 @@ class AgentRunner:
         self._last_refresh_monotonic: float | None = None
         self._step_override: str | None = None
         self._persistent_step: str | None = None
+        self._repeat_send_payload: dict[str, Any] | None = None
+        self._next_repeated_send_monotonic: float | None = None
 
     @staticmethod
     def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +188,58 @@ class AgentRunner:
             interval,
         )
 
+    def _schedule_repeated_send(self, payload: dict[str, Any]) -> None:
+        interval = _resolve_send_repeat_interval_seconds()
+        self._repeat_send_payload = dict(payload)
+        self._next_repeated_send_monotonic = self._monotonic() + interval
+        self.logger.info(
+            "send_repeat_scheduled bot_id=%s interval=%s",
+            self.agent.bot_id,
+            interval,
+        )
+
+    def _cancel_repeated_send(self) -> None:
+        if self._repeat_send_payload is None:
+            return
+        self.logger.info("send_repeat_cancelled bot_id=%s", self.agent.bot_id)
+        self._repeat_send_payload = None
+        self._next_repeated_send_monotonic = None
+
+    def _run_repeated_send_if_due(self) -> None:
+        if self._repeat_send_payload is None or self._next_repeated_send_monotonic is None:
+            return
+        now = self._monotonic()
+        if now < self._next_repeated_send_monotonic:
+            return
+
+        payload = dict(self._repeat_send_payload)
+        interval = _resolve_send_repeat_interval_seconds()
+        try:
+            self._set_bot_state("session_active", "계산발송 반복 중")
+            result = send_expected_tax_amounts(
+                bot_id=self.agent.bot_id,
+                payload=payload,
+                logger=logging.getLogger("income33.agent.browser_control"),
+            )
+        except Exception as exc:
+            self._cancel_repeated_send()
+            self._set_bot_state("manual_required", f"계산발송 실패: {exc}")
+            self._send_current_state_heartbeat()
+            self.logger.exception("send_repeat_failed bot_id=%s", self.agent.bot_id)
+            return
+
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "계산발송 완료"),
+        )
+        self._next_repeated_send_monotonic = now + interval
+        self._send_current_state_heartbeat()
+        self.logger.info(
+            "send_repeat_done bot_id=%s next_interval=%s",
+            self.agent.bot_id,
+            interval,
+        )
+
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
         command_id = command["id"]
@@ -186,6 +250,8 @@ class AgentRunner:
             command_name,
             self.agent.bot_id,
         )
+        if command_name not in {"status", "send_expected_tax_amounts"}:
+            self._cancel_repeated_send()
 
         try:
             if command_name == "start":
@@ -251,6 +317,18 @@ class AgentRunner:
                     str(result.get("status") or "session_active"),
                     str(result.get("current_step") or "목록조회 테스트 완료"),
                 )
+            elif command_name == "send_expected_tax_amounts":
+                self._set_bot_state("session_active", "계산발송 중")
+                result = send_expected_tax_amounts(
+                    bot_id=self.agent.bot_id,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+                self._set_bot_state(
+                    str(result.get("status") or "session_active"),
+                    str(result.get("current_step") or "계산발송 완료"),
+                )
+                self._schedule_repeated_send(payload)
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
@@ -288,6 +366,9 @@ class AgentRunner:
 
         for command in commands:
             self._handle_command(command)
+
+        if not commands:
+            self._run_repeated_send_if_due()
 
     def run_forever(self) -> None:
         interval = max(1, int(self.agent.heartbeat_interval_seconds))

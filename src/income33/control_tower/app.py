@@ -28,6 +28,7 @@ DASHBOARD_ALLOWED_COMMANDS = {
     "fill_login",
     "refresh_page",
     "preview_send_targets",
+    "send_expected_tax_amounts",
 }
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
@@ -85,6 +86,7 @@ def _bot_actions_html(bot_id: str) -> str:
         _command_button(bot_id, "fill_login", "로그인 입력", "login"),
         _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
         _command_button(bot_id, "preview_send_targets", "목록조회 테스트", "refresh"),
+        _command_button(bot_id, "send_expected_tax_amounts", "계산발송", "send"),
         _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
         _submit_auth_code_form(bot_id),
     ]
@@ -185,6 +187,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           button.login {{ background: #eef2ff; border-color: #818cf8; }}
           button.login-done {{ background: #ecfdf5; border-color: #34d399; }}
           button.refresh {{ background: #eff6ff; border-color: #60a5fa; }}
+          button.send {{ background: #fef2f2; border-color: #f87171; color: #991b1b; font-weight: 600; }}
           button.auth {{ background: #fff7ed; border-color: #fb923c; }}
           code {{ background: #eef2ff; padding: 2px 6px; border-radius: 4px; }}
         </style>

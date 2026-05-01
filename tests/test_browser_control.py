@@ -104,3 +104,89 @@ def test_preview_send_targets_scans_all_pages_reverse_by_default(monkeypatch):
     assert result["pages_scanned"] == [2, 1, 0]
     assert result["tax_doc_ids"] == list(range(41, 46)) + list(range(21, 41)) + list(range(1, 21))
     assert result["current_step"] == "목록조회 테스트 45/45건 역순 3→1/3페이지 총 3페이지 officeId=325"
+
+
+def test_send_expected_tax_amounts_posts_selected_tax_doc_ids(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        assert url.endswith("/api/tax/v1/taxdocs/expected-tax-amount/send")
+        assert method == "POST"
+        assert headers["x-host"] == "GIT"
+        assert headers["x-web-path"] == "https://newta.3o3.co.kr/tasks/git"
+        assert json_body == {"taxDocIdSet": [1360165, 1360211]}
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"tax_doc_ids": [1360165, 1360211]},
+    )
+
+    assert len(calls) == 1
+    assert result["status"] == "session_active"
+    assert result["sent_count"] == 2
+    assert result["tax_doc_ids"] == [1360165, 1360211]
+    assert result["current_step"] == "계산발송 완료 2건 status=200"
+
+
+def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "content": [{"taxDocId": 11}, {"taxDocId": 12}],
+                        "totalElements": 2,
+                        "totalPages": 1,
+                    },
+                },
+            }
+        assert url.endswith("/api/tax/v1/taxdocs/expected-tax-amount/send")
+        assert method == "POST"
+        assert json_body == {"taxDocIdSet": [11, 12]}
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_expected_tax_amounts(bot_id="sender-01", payload={"year": 2025, "size": 20})
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    assert result["sent_count"] == 2
+    assert result["tax_doc_ids"] == [11, 12]
+
+
+def test_send_expected_tax_amounts_dry_run_does_not_post(monkeypatch):
+    monkeypatch.setenv("INCOME33_BROWSER_CONTROL_DRY_RUN", "1")
+
+    def _fail_fetch(*args, **kwargs):
+        raise AssertionError("dry run should not fetch or post")
+
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", _fail_fetch)
+
+    result = browser_control.send_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"tax_doc_ids": [1, 2, 3]},
+    )
+
+    assert result["dry_run"] is True
+    assert result["sent_count"] == 3
+    assert result["current_step"] == "계산발송 dry-run 3건"

@@ -44,10 +44,30 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "인증코드 제출" in root.text
     assert "새로고침" in root.text
     assert "목록조회 테스트" in root.text
+    assert "계산발송" in root.text
     assert "content='5'" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" in root.text
+    assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+
+
+def test_api_can_queue_send_expected_tax_amounts_command(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    assert queued.json()["status"] == "pending"
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_expected_tax_amounts"
+    assert '"tax_doc_ids": [1360165]' in commands[0]["payload_json"]
 
 
 def test_api_can_queue_preview_send_targets_command(tmp_path):
