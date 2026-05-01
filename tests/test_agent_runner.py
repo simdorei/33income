@@ -210,7 +210,7 @@ def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
 
     runner.run_once()
 
-    assert client.heartbeats[-1]["current_step"] == "계산발송 완료"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 / 다음발송 300초 후"
 
 
 def test_runner_reports_failure_step_when_send_command_fails(monkeypatch):
@@ -262,7 +262,7 @@ def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monke
 
 
 def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
-    monotonic_points = iter([1000.0, 1299.0, 1300.0])
+    monotonic_points = iter([1000.0, 1299.0, 1299.0, 1300.0, 1300.0])
     calls = []
 
     def fake_monotonic():
@@ -291,7 +291,9 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
     )
 
     runner.run_once()
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #1 / 다음발송 300초 후"
     runner.run_once()
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #1 / 다음발송 1초 후"
     runner.run_once()
 
     assert calls == [
@@ -299,11 +301,11 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
         {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
     ]
     assert client.completed == [{"command_id": 15, "status": "done", "error_message": None}]
-    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2 / 다음발송 300초 후"
 
 
 def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monkeypatch):
-    monotonic_points = iter([1000.0, 1300.0])
+    monotonic_points = iter([1000.0, 1300.0, 1300.0])
     send_calls = []
     assign_calls = []
 
@@ -343,7 +345,7 @@ def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monk
 
 
 def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypatch):
-    monotonic_points = iter([1000.0, 1300.0, 1600.0])
+    monotonic_points = iter([1000.0, 1300.0, 1300.0, 1600.0, 1600.0])
     send_calls = []
     assign_calls = []
 
@@ -381,7 +383,7 @@ def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypa
 
     assert len(send_calls) == 3
     assert assign_calls == [{"bot_id": "sender-01", "tax_doc_ids": [555], "payload": {"year": 2025, "size": 20}}]
-    assert client.heartbeats[-1]["current_step"] == "잔여목록 배정 완료 1건 담당자=817 status=200"
+    assert client.heartbeats[-1]["current_step"] == "잔여목록 배정 완료 1건 담당자=817 status=200 / 다음발송 300초 후"
 
 
 def test_runner_cancels_repeated_send_when_operator_queues_control_command(monkeypatch):

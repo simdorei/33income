@@ -120,11 +120,26 @@ class AgentRunner:
 
     def _apply_snapshot_override(self, snapshot: Any) -> Any:
         step = self._step_override or self._persistent_step
+        if self._step_override is None and self._repeat_send_payload is not None:
+            step = self._repeat_send_wait_step(step or "계산발송 완료")
         if step:
             snapshot.current_step = step
             snapshot.status = self.bot.status
             self._step_override = None
         return snapshot
+
+    @staticmethod
+    def _strip_repeat_send_wait_suffix(step: str) -> str:
+        return step.split(" / 다음발송 ", 1)[0]
+
+    def _repeat_send_wait_step(self, base_step: str, remaining_seconds: int | None = None) -> str:
+        base_step = self._strip_repeat_send_wait_suffix(base_step)
+        if remaining_seconds is None:
+            if self._next_repeated_send_monotonic is None:
+                remaining_seconds = _resolve_send_repeat_interval_seconds()
+            else:
+                remaining_seconds = max(0, int(self._next_repeated_send_monotonic - self._monotonic()))
+        return f"{base_step} / 다음발송 {remaining_seconds}초 후"
 
     def _build_heartbeat_payload(self, snapshot: Any) -> dict[str, Any]:
         return {
@@ -285,11 +300,12 @@ class AgentRunner:
                 self._repeat_send_attempt_counts.pop(tax_doc_id, None)
             result = assign_result
 
+        self._next_repeated_send_monotonic = now + interval
+        result_step = str(result.get("current_step") or "계산발송 완료")
         self._set_bot_state(
             str(result.get("status") or "session_active"),
-            str(result.get("current_step") or "계산발송 완료"),
+            self._repeat_send_wait_step(result_step, remaining_seconds=interval),
         )
-        self._next_repeated_send_monotonic = now + interval
         self._send_current_state_heartbeat()
         self.logger.info(
             "send_repeat_done bot_id=%s next_interval=%s",
@@ -384,16 +400,19 @@ class AgentRunner:
                     payload=payload,
                     logger=logging.getLogger("income33.agent.browser_control"),
                 )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "계산발송 완료"),
-                )
+                result_status = str(result.get("status") or "session_active")
+                result_step = str(result.get("current_step") or "계산발송 완료")
                 if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
                     self._schedule_repeated_send(payload)
                     self._track_repeat_send_attempts(
                         self._repeat_send_attempt_counts,
                         list(result.get("tax_doc_ids") or []),
                     )
+                    result_step = self._repeat_send_wait_step(
+                        result_step,
+                        remaining_seconds=_resolve_send_repeat_interval_seconds(),
+                    )
+                self._set_bot_state(result_status, result_step)
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
