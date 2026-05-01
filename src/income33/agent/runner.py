@@ -206,22 +206,6 @@ class AgentRunner:
             interval,
         )
 
-    def _add_repeat_excluded_tax_doc_ids(self, tax_doc_ids: list[Any]) -> None:
-        if self._repeat_send_payload is None:
-            return
-        if _payload_has_explicit_tax_doc_ids(self._repeat_send_payload):
-            return
-        merged: list[int] = []
-        for raw_id in list(self._repeat_send_payload.get("exclude_tax_doc_ids") or []) + list(tax_doc_ids or []):
-            try:
-                tax_doc_id = int(raw_id)
-            except (TypeError, ValueError):
-                continue
-            if tax_doc_id > 0 and tax_doc_id not in merged:
-                merged.append(tax_doc_id)
-        if merged:
-            self._repeat_send_payload["exclude_tax_doc_ids"] = merged
-
     def _cancel_repeated_send(self) -> None:
         if self._repeat_send_payload is None:
             return
@@ -260,7 +244,6 @@ class AgentRunner:
             str(result.get("status") or "session_active"),
             str(result.get("current_step") or "계산발송 완료"),
         )
-        self._add_repeat_excluded_tax_doc_ids(list(result.get("tax_doc_ids") or []))
         self._next_repeated_send_monotonic = now + interval
         self._send_current_state_heartbeat()
         self.logger.info(
@@ -362,7 +345,6 @@ class AgentRunner:
                 )
                 if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
                     self._schedule_repeated_send(payload)
-                    self._add_repeat_excluded_tax_doc_ids(list(result.get("tax_doc_ids") or []))
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)

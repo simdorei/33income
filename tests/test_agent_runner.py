@@ -274,7 +274,6 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
         return {
             "status": "session_active",
             "current_step": f"계산발송 완료 #{len(calls)}",
-            "tax_doc_ids": [100 + len(calls)],
         }
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
@@ -295,7 +294,7 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
 
     assert calls == [
         {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
-        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20, "exclude_tax_doc_ids": [101]}},
+        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
     ]
     assert client.completed == [{"command_id": 15, "status": "done", "error_message": None}]
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2"
