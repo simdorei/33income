@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from income33.agent.browser_control import resolve_browser_debug_port
+from income33.agent.browser_control import resolve_browser_debug_port, resolve_selector_text
 from income33.agent.login import open_login_browser, open_login_window, resolve_login_url, resolve_profile_dir
 
 
@@ -61,3 +61,26 @@ def test_debug_port_mapping_with_sender_reporter(monkeypatch):
 
     assert resolve_browser_debug_port("sender-09") == 29209
     assert resolve_browser_debug_port("reporter-09") == 29309
+
+
+def test_selector_resolution_prefers_payload_then_env(monkeypatch):
+    monkeypatch.setenv("INCOME33_LOGIN_ID_SELECTOR", "input#from-env")
+
+    assert (
+        resolve_selector_text(
+            {"login_id_selector": "xpath=//input[@id='fast-id']"},
+            payload_key="login_id_selector",
+            env_name="INCOME33_LOGIN_ID_SELECTOR",
+            fallback="input[name='username']",
+        )
+        == "xpath=//input[@id='fast-id']"
+    )
+    assert (
+        resolve_selector_text(
+            {},
+            payload_key="login_id_selector",
+            env_name="INCOME33_LOGIN_ID_SELECTOR",
+            fallback="input[name='username']",
+        )
+        == "input#from-env"
+    )

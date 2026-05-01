@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from income33.agent.browser_control import (
     fill_login,
+    inspect_login_state,
     is_keepalive_due,
     is_refresh_enabled,
     refresh_page,
@@ -33,6 +34,14 @@ _KEEPALIVE_BLOCKING_STATUSES = {
     "crashed",
 }
 
+_LOGIN_STATE_PROBE_STATUSES = {
+    "login_opened",
+    "login_filling",
+    "login_auth_required",
+    "manual_required",
+    "session_active",
+}
+
 
 def _build_bot_runner(agent: AgentConfig):
     if agent.bot_type == "reporter":
@@ -40,7 +49,7 @@ def _build_bot_runner(agent: AgentConfig):
     return SenderBotRunner(bot_id=agent.bot_id)
 
 
-class MockAgentRunner:
+class AgentRunner:
     def __init__(
         self,
         agent: AgentConfig,
@@ -79,6 +88,49 @@ class MockAgentRunner:
             snapshot.status = self.bot.status
             self._step_override = None
         return snapshot
+
+    def _build_heartbeat_payload(self, snapshot: Any) -> dict[str, Any]:
+        return {
+            "pc_id": self.agent.pc_id,
+            "hostname": self.agent.hostname,
+            "ip_address": self.agent.ip_address,
+            "agent_status": "online",
+            "bot_id": snapshot.bot_id,
+            "bot_status": snapshot.status,
+            "current_step": snapshot.current_step,
+            "success_count": snapshot.success_count,
+            "failure_count": snapshot.failure_count,
+        }
+
+    def _send_snapshot_heartbeat(self, snapshot: Any) -> None:
+        heartbeat_payload = self._build_heartbeat_payload(snapshot)
+        self.client.send_heartbeat(heartbeat_payload)
+        self.logger.debug(
+            "heartbeat_sent pc_id=%s bot_id=%s step=%s",
+            self.agent.pc_id,
+            snapshot.bot_id,
+            snapshot.current_step,
+        )
+
+    def _send_current_state_heartbeat(self) -> None:
+        snapshot = self._apply_snapshot_override(self.bot.tick())
+        self.logger.debug("bot_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
+        self._send_snapshot_heartbeat(snapshot)
+
+    def _probe_browser_login_state(self) -> None:
+        if self.bot.status not in _LOGIN_STATE_PROBE_STATUSES:
+            return
+        result = inspect_login_state(
+            bot_id=self.agent.bot_id,
+            payload={},
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        if not result:
+            return
+        self._set_bot_state(
+            str(result.get("status") or self.bot.status),
+            str(result.get("current_step") or self.bot.status),
+        )
 
     def _run_keepalive_if_due(self) -> None:
         if not is_refresh_enabled():
@@ -189,32 +241,16 @@ class MockAgentRunner:
             return
 
         self.client.complete_command(command_id=command_id, status="done")
+        self._send_current_state_heartbeat()
         self.logger.debug("command_completed command_id=%s", command_id)
 
     def run_once(self) -> None:
         self._run_keepalive_if_due()
+        self._probe_browser_login_state()
         snapshot = self._apply_snapshot_override(self.bot.tick())
         self.logger.debug("bot_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
 
-        heartbeat_payload = {
-            "pc_id": self.agent.pc_id,
-            "hostname": self.agent.hostname,
-            "ip_address": self.agent.ip_address,
-            "agent_status": "online",
-            "bot_id": snapshot.bot_id,
-            "bot_status": snapshot.status,
-            "current_step": snapshot.current_step,
-            "success_count": snapshot.success_count,
-            "failure_count": snapshot.failure_count,
-        }
-
-        self.client.send_heartbeat(heartbeat_payload)
-        self.logger.debug(
-            "heartbeat_sent pc_id=%s bot_id=%s step=%s",
-            self.agent.pc_id,
-            snapshot.bot_id,
-            snapshot.current_step,
-        )
+        self._send_snapshot_heartbeat(snapshot)
 
         commands = self.client.poll_commands(self.agent.pc_id, limit=5)
         self.logger.debug("polled_commands count=%s pc_id=%s", len(commands), self.agent.pc_id)
@@ -268,7 +304,7 @@ def main() -> None:
         )
         raise
 
-    runner = MockAgentRunner(agent=config.agent, client=client, logger=logger)
+    runner = AgentRunner(agent=config.agent, client=client, logger=logger)
 
     if args.once:
         runner.run_once()

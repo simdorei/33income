@@ -30,7 +30,7 @@ def main() -> None:
     setup_component_logger("income33.reporter", "reporter.log")
     logger = logging.getLogger("income33.reporter.runner")
 
-    parser = argparse.ArgumentParser(description="Mock reporter bot runner")
+    parser = argparse.ArgumentParser(description="33income reporter bot runner")
     parser.add_argument("--bot-id", default=os.getenv("INCOME33_AGENT_BOT_ID", "reporter-01"))
     parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--once", action="store_true")

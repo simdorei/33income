@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "income33"
 version = "0.1.0"
-description = "33income Windows-first mock control tower and agent scaffold"
+description = "33income Windows-first control tower and agent runtime"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

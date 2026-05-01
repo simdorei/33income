@@ -9,10 +9,10 @@ from income33.db import Database
 def build_client(tmp_path):
     db_path = tmp_path / "tower.db"
     config = AppConfig(
-        control_tower=ControlTowerConfig(database_path=str(db_path), mock_agent_count=18)
+        control_tower=ControlTowerConfig(database_path=str(db_path), bootstrap_agent_count=18)
     )
     db = Database(str(db_path))
-    service = ControlTowerService(db=db, mock_agent_count=18)
+    service = ControlTowerService(db=db, bootstrap_agent_count=18)
     app = create_app(config=config, service=service)
     return TestClient(app)
 
@@ -43,6 +43,7 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "로그인 입력" in root.text
     assert "인증코드 제출" in root.text
     assert "새로고침" in root.text
+    assert "content='5'" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
 

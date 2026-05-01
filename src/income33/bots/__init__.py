@@ -1,1 +1,1 @@
-"""Mock bot runners for sender/reporter."""
+"""Bot runners for sender/reporter slots."""

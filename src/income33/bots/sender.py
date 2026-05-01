@@ -28,7 +28,7 @@ def main() -> None:
     setup_component_logger("income33.sender", "sender.log")
     logger = logging.getLogger("income33.sender.runner")
 
-    parser = argparse.ArgumentParser(description="Mock sender bot runner")
+    parser = argparse.ArgumentParser(description="33income sender bot runner")
     parser.add_argument("--bot-id", default=os.getenv("INCOME33_AGENT_BOT_ID", "sender-01"))
     parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--once", action="store_true")

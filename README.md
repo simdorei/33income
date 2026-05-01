@@ -3,11 +3,11 @@
 `33income`는 **Windows 관제 PC + Windows 봇 PC 18대** 기준으로 시작하는 운영 골격 레포입니다.
 
 - 관제: FastAPI control tower (`http://127.0.0.1:8330`)
-- 봇 PC: local agent + sender/reporter mock runner
+- 봇 PC: local agent + sender/reporter runner
 - DB: SQLite (`data/33income.db`)
 - 목적: 실제 사이트 자동화 전, 멀티-PC 운영 구조를 먼저 검증
 
-> 실제 사이트 자동화 로직은 아직 포함하지 않았고, 현재는 mock 기반 관제/agent/bot 골격입니다.
+> 실제 사이트 자동화 로직은 아직 포함하지 않았고, 현재는 고정 슬롯 기반 관제/agent/bot 운영 골격입니다. 아직 연결되지 않은 슬롯은 `접속필요`로 표시됩니다.
 
 ---
 

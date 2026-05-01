@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -138,6 +137,30 @@ def _env_text(name: str, fallback: str) -> str:
     return value
 
 
+def resolve_selector_text(
+    payload: dict[str, Any] | None,
+    *,
+    payload_key: str,
+    env_name: str,
+    fallback: str,
+) -> str:
+    payload = payload or {}
+    configured = payload.get(payload_key)
+    if configured is not None and str(configured).strip():
+        return str(configured).strip()
+    return _env_text(env_name, fallback)
+
+
+def resolve_selector_timeout_ms(payload: dict[str, Any] | None = None) -> int:
+    payload = payload or {}
+    if payload.get("selector_timeout_ms"):
+        try:
+            return max(100, int(payload["selector_timeout_ms"]))
+        except (TypeError, ValueError):
+            pass
+    return max(100, _env_int("INCOME33_SELECTOR_TIMEOUT_MS", 2_000))
+
+
 def _split_selector_candidates(selector_text: str) -> list[str]:
     if "||" in selector_text:
         return [part.strip() for part in selector_text.split("||") if part.strip()]
@@ -154,6 +177,17 @@ def _first_visible_locator(page: Any, selector_text: str, timeout_ms: int = 10_0
         except Exception:
             continue
     raise RuntimeError(f"visible selector not found: {selector_text}")
+
+
+def _has_visible_locator(page: Any, selector_text: str, timeout_ms: int = 500) -> bool:
+    for candidate in _split_selector_candidates(selector_text):
+        locator = page.locator(candidate).first
+        try:
+            locator.wait_for(state="visible", timeout=timeout_ms)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _resolve_browser_page(browser: Any) -> Any:
@@ -300,37 +334,52 @@ def fill_login(
         }
 
     login_url = resolve_login_url(payload)
-    id_selector = _env_text(
-        "INCOME33_LOGIN_ID_SELECTOR",
-        "input[name='username'] || input[type='email'] || input[type='text']",
+    id_selector = resolve_selector_text(
+        payload,
+        payload_key="login_id_selector",
+        env_name="INCOME33_LOGIN_ID_SELECTOR",
+        fallback="input[name='username'] || input[type='email'] || input[type='text']",
     )
-    password_selector = _env_text(
-        "INCOME33_LOGIN_PASSWORD_SELECTOR",
-        "input[name='password'] || input[type='password']",
+    password_selector = resolve_selector_text(
+        payload,
+        payload_key="login_password_selector",
+        env_name="INCOME33_LOGIN_PASSWORD_SELECTOR",
+        fallback="input[name='password'] || input[type='password']",
     )
-    submit_selector = _env_text(
-        "INCOME33_LOGIN_SUBMIT_SELECTOR",
-        "button[type='submit'] || button:has-text('로그인') || button:has-text('Login')",
+    submit_selector = resolve_selector_text(
+        payload,
+        payload_key="login_submit_selector",
+        env_name="INCOME33_LOGIN_SUBMIT_SELECTOR",
+        fallback="button[type='submit'] || button:has-text('로그인') || button:has-text('Login')",
     )
+    auth_selector = resolve_selector_text(
+        payload,
+        payload_key="login_auth_code_selector",
+        env_name="INCOME33_LOGIN_AUTH_CODE_SELECTOR",
+        fallback="input[name='authCode'] || input[name='otp'] || input[inputmode='numeric'] || input[type='tel']",
+    )
+    selector_timeout_ms = resolve_selector_timeout_ms(payload)
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
         page.goto(login_url, wait_until="domcontentloaded")
-        id_locator, matched_id_selector = _first_visible_locator(page, id_selector)
-        password_locator, matched_password_selector = _first_visible_locator(page, password_selector)
+        id_locator, matched_id_selector = _first_visible_locator(page, id_selector, selector_timeout_ms)
+        password_locator, matched_password_selector = _first_visible_locator(page, password_selector, selector_timeout_ms)
         id_locator.fill(login_id)
         password_locator.fill(login_password)
-        submit_locator, matched_submit_selector = _first_visible_locator(page, submit_selector)
+        submit_locator, matched_submit_selector = _first_visible_locator(page, submit_selector, selector_timeout_ms)
         submit_locator.click()
+        auth_visible = _has_visible_locator(page, auth_selector, timeout_ms=5_000)
         return {
             "ok": True,
             "dry_run": False,
-            "status": "login_auth_required",
-            "current_step": "login_auth_required",
+            "status": "login_auth_required" if auth_visible else "login_filling",
+            "current_step": "인증코드 입력 대기" if auth_visible else "로그인 제출 후 확인 중",
             "debug_port": debug_port,
             "matched_selectors": {
                 "id": matched_id_selector,
                 "password": matched_password_selector,
                 "submit": matched_submit_selector,
+                "auth_code_visible": auth_visible,
             },
         }
 
@@ -373,34 +422,37 @@ def submit_auth_code(
             "url": "https://newta.3o3.co.kr/dashboard",
         }
 
-    auth_selector = _env_text(
-        "INCOME33_LOGIN_AUTH_CODE_SELECTOR",
-        "input[name='authCode'] || input[name='otp'] || input[inputmode='numeric'] || input[type='tel']",
+    auth_selector = resolve_selector_text(
+        payload,
+        payload_key="login_auth_code_selector",
+        env_name="INCOME33_LOGIN_AUTH_CODE_SELECTOR",
+        fallback="input[name='authCode'] || input[name='otp'] || input[inputmode='numeric'] || input[type='tel']",
     )
-    submit_selector = _env_text(
-        "INCOME33_LOGIN_AUTH_SUBMIT_SELECTOR",
-        "button[type='submit'] || button:has-text('확인') || button:has-text('인증') || button:has-text('Verify')",
+    submit_selector = resolve_selector_text(
+        payload,
+        payload_key="login_auth_submit_selector",
+        env_name="INCOME33_LOGIN_AUTH_SUBMIT_SELECTOR",
+        fallback="button[type='submit'] || button:has-text('확인') || button:has-text('인증') || button:has-text('Verify')",
     )
     dashboard_url = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/dashboard")
+    selector_timeout_ms = resolve_selector_timeout_ms(payload)
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
-        auth_locator, matched_auth_selector = _first_visible_locator(page, auth_selector)
+        auth_locator, matched_auth_selector = _first_visible_locator(page, auth_selector, selector_timeout_ms)
         auth_locator.fill(safe_code)
-        submit_locator, matched_submit_selector = _first_visible_locator(page, submit_selector)
+        submit_locator, matched_submit_selector = _first_visible_locator(page, submit_selector, selector_timeout_ms)
         submit_locator.click()
-        time.sleep(0.3)
+        try:
+            page.wait_for_url(f"{dashboard_url.rstrip('/')}**", timeout=10_000)
+        except Exception:
+            pass
         current_url = page.url
-        if current_url.rstrip("/") != dashboard_url.rstrip("/"):
-            try:
-                page.goto(dashboard_url, wait_until="domcontentloaded", timeout=10_000)
-                current_url = page.url
-            except Exception:
-                current_url = page.url
+        on_dashboard = current_url.rstrip("/").startswith(dashboard_url.rstrip("/"))
         return {
-            "ok": True,
+            "ok": on_dashboard,
             "dry_run": False,
-            "status": "session_active",
-            "current_step": "session_active",
+            "status": "session_active" if on_dashboard else "login_auth_required",
+            "current_step": "session_active" if on_dashboard else "인증코드 확인 필요",
             "debug_port": debug_port,
             "url": current_url,
             "matched_selectors": {
@@ -416,6 +468,59 @@ def submit_auth_code(
         result.get("debug_port"),
         mask_secret(safe_code),
     )
+    return result
+
+
+def inspect_login_state(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    if is_browser_control_dry_run(payload):
+        return None
+
+    auth_selector = resolve_selector_text(
+        payload,
+        payload_key="login_auth_code_selector",
+        env_name="INCOME33_LOGIN_AUTH_CODE_SELECTOR",
+        fallback="input[name='authCode'] || input[name='otp'] || input[inputmode='numeric'] || input[type='tel']",
+    )
+    dashboard_url = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/dashboard")
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any] | None:
+        current_url = page.url
+        if current_url.rstrip("/").startswith(dashboard_url.rstrip("/")):
+            return {
+                "status": "session_active",
+                "current_step": "session_active",
+                "url": current_url,
+                "debug_port": debug_port,
+            }
+        if _has_visible_locator(page, auth_selector, timeout_ms=500):
+            return {
+                "status": "login_auth_required",
+                "current_step": "인증코드 입력 대기",
+                "url": current_url,
+                "debug_port": debug_port,
+            }
+        return None
+
+    try:
+        result = _run_in_cdp_session(bot_id, payload, _run)
+    except Exception as exc:
+        logger.debug("inspect_login_state_skipped bot_id=%s error=%s", bot_id, exc)
+        return None
+    if result:
+        logger.info(
+            "inspect_login_state bot_id=%s status=%s step=%s url=%s",
+            bot_id,
+            result.get("status"),
+            result.get("current_step"),
+            result.get("url"),
+        )
     return result
 
 

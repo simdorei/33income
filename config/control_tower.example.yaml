@@ -5,6 +5,6 @@ server:
 database:
   path: data/33income.db
 
-mock:
+slots:
   agent_count: 18
   stale_seconds: 180

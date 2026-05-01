@@ -167,6 +167,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
     <html lang='ko'>
       <head>
         <meta charset='utf-8' />
+        <meta http-equiv='refresh' content='5' />
         <title>33income Control Tower</title>
         <style>
           body {{ font-family: Arial, sans-serif; margin: 24px; background: #f7f8fb; }}
@@ -215,7 +216,7 @@ def create_app(
     resolved_config = config or load_config()
     resolved_service = service or ControlTowerService(
         db=Database(resolved_config.control_tower.database_path),
-        mock_agent_count=resolved_config.control_tower.mock_agent_count,
+        bootstrap_agent_count=resolved_config.control_tower.bootstrap_agent_count,
     )
 
     # Ensure startup seed even in tests that do not run lifespan events.

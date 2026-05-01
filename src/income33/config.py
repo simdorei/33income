@@ -14,7 +14,7 @@ class ControlTowerConfig:
     host: str = "127.0.0.1"
     port: int = 8330
     database_path: str = "data/33income.db"
-    mock_agent_count: int = 18
+    bootstrap_agent_count: int = 18
     stale_seconds: int = 180
 
 
@@ -26,7 +26,7 @@ class AgentConfig:
     control_tower_url: str = "http://127.0.0.1:8330"
     bot_id: str = "sender-01"
     bot_type: str = "sender"
-    heartbeat_interval_seconds: int = 30
+    heartbeat_interval_seconds: int = 5
 
 
 @dataclass
@@ -64,7 +64,7 @@ def load_config(
 
     server_yaml = control_tower_yaml.get("server", {})
     database_yaml = control_tower_yaml.get("database", {})
-    mock_yaml = control_tower_yaml.get("mock", {})
+    slot_yaml = control_tower_yaml.get("slots", control_tower_yaml.get("bootstrap", {}))
 
     agent_section = agent_yaml.get("agent", {})
     bot_section = agent_yaml.get("bot", {})
@@ -75,13 +75,13 @@ def load_config(
         "INCOME33_DB_PATH",
         str(database_yaml.get("path", "data/33income.db")),
     )
-    mock_agent_count = _env_int(
-        "INCOME33_MOCK_AGENT_COUNT",
-        int(mock_yaml.get("agent_count", 18)),
+    bootstrap_agent_count = _env_int(
+        "INCOME33_BOOTSTRAP_AGENT_COUNT",
+        int(slot_yaml.get("agent_count", 18)),
     )
     stale_seconds = _env_int(
         "INCOME33_STALE_SECONDS",
-        int(mock_yaml.get("stale_seconds", 180)),
+        int(slot_yaml.get("stale_seconds", 180)),
     )
 
     control_tower_url = os.getenv(
@@ -111,7 +111,7 @@ def load_config(
     )
     heartbeat_interval = _env_int(
         "INCOME33_AGENT_HEARTBEAT_INTERVAL_SECONDS",
-        int(agent_section.get("heartbeat_interval_seconds", 30)),
+        int(agent_section.get("heartbeat_interval_seconds", 5)),
     )
 
     return AppConfig(
@@ -119,7 +119,7 @@ def load_config(
             host=host,
             port=port,
             database_path=database_path,
-            mock_agent_count=mock_agent_count,
+            bootstrap_agent_count=bootstrap_agent_count,
             stale_seconds=stale_seconds,
         ),
         agent=AgentConfig(

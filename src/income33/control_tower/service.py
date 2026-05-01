@@ -17,14 +17,21 @@ def _sanitize_command_for_response(command: dict[str, Any]) -> dict[str, Any]:
 
 
 class ControlTowerService:
-    def __init__(self, db: Database, mock_agent_count: int = 18) -> None:
+    def __init__(
+        self,
+        db: Database,
+        bootstrap_agent_count: int = 18,
+    ) -> None:
         self.db = db
-        self.mock_agent_count = mock_agent_count
+        self.bootstrap_agent_count = bootstrap_agent_count
 
     def bootstrap(self) -> None:
         self.db.init_db()
-        self.db.seed_mock_data(agent_count=self.mock_agent_count)
-        logger.info("control_tower_bootstrap_done mock_agent_count=%s", self.mock_agent_count)
+        self.db.ensure_agent_slots(agent_count=self.bootstrap_agent_count)
+        logger.info(
+            "control_tower_bootstrap_done bootstrap_agent_count=%s",
+            self.bootstrap_agent_count,
+        )
 
     def get_summary(self) -> dict[str, Any]:
         return self.db.get_summary()

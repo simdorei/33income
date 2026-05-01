@@ -216,7 +216,7 @@ control tower → DB: 상태 저장
 
 초기 상태:
 
-- 실제 사이트 연동 전에는 mock worker로 heartbeat와 상태 변화만 구현한다.
+- 실제 사이트 연동 전에는 고정 슬롯과 heartbeat로 연결/상태 변화를 먼저 검증한다.
 
 ### 4.4 신고봇 reporter
 
@@ -544,7 +544,7 @@ recovered: 복구 알림 1회
 - 기본 config 로더
 - SQLite 초기화
 - 중앙 관제 FastAPI 웹서버
-- mock agent / mock bot 18대 상태 표시
+- 고정 agent/bot 18대 슬롯 상태 표시
 
 완료 기준:
 
@@ -556,7 +556,7 @@ recovered: 복구 알림 1회
 - local agent 실행
 - agent heartbeat 구현
 - 중앙 관제 command queue 구현
-- start/stop/restart mock 처리
+- start/stop/restart 명령 큐 처리
 
 완료 기준:
 
@@ -622,8 +622,8 @@ recovered: 복구 알림 1회
 2. Windows `.venv` 세팅 bat
 3. 중앙 관제 FastAPI 기본 웹페이지
 4. SQLite DB
-5. mock PC/agent 18대와 sender/reporter 18봇 표시
-6. mock start/stop/restart command queue
+5. PC/agent 18대와 sender/reporter 18봇 고정 슬롯 표시
+6. start/stop/restart command queue
 7. heartbeat/stuck 상태 시뮬레이션
 
 이렇게 해야 실제 request 분석 전에도 **18대 PC 기반 운영 골격**을 먼저 검증할 수 있다.

@@ -1,6 +1,6 @@
 import json
 
-from income33.agent.runner import MockAgentRunner
+from income33.agent.runner import AgentRunner
 from income33.config import AgentConfig
 
 
@@ -38,7 +38,7 @@ def build_runner(commands=None, monotonic_fn=None):
         heartbeat_interval_seconds=30,
     )
     client = FakeClient(commands=commands)
-    return MockAgentRunner(agent=agent, client=client, monotonic_fn=monotonic_fn), client
+    return AgentRunner(agent=agent, client=client, monotonic_fn=monotonic_fn), client
 
 
 def test_runner_handles_open_login_command(monkeypatch, tmp_path):
@@ -83,6 +83,26 @@ def test_runner_handles_fill_login_command(monkeypatch):
     assert calls == [{"bot_id": "sender-01", "payload": {"dry_run": True}}]
     assert client.completed == [{"command_id": 10, "status": "done", "error_message": None}]
     assert runner.bot.status == "login_auth_required"
+    assert client.heartbeats[-1]["bot_status"] == "login_auth_required"
+    assert client.heartbeats[-1]["current_step"] == "login_auth_required"
+
+
+def test_runner_probes_browser_login_state_before_heartbeat(monkeypatch):
+    calls = []
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "login_auth_required", "current_step": "인증코드 입력 대기"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    runner, client = build_runner()
+    runner.bot.status = "login_opened"
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {}}]
+    assert client.heartbeats[0]["bot_status"] == "login_auth_required"
+    assert client.heartbeats[0]["current_step"] == "인증코드 입력 대기"
 
 
 def test_runner_handles_submit_auth_code_command(monkeypatch):

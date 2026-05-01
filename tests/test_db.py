@@ -3,12 +3,12 @@ import json
 from income33.db import Database
 
 
-def test_init_and_seed_mock_data(tmp_path):
+def test_init_and_ensure_agent_slots(tmp_path):
     db_path = tmp_path / "33income.db"
     db = Database(str(db_path))
 
     db.init_db()
-    db.seed_mock_data(agent_count=18)
+    db.ensure_agent_slots(agent_count=18)
 
     summary = db.get_summary()
 
@@ -26,11 +26,73 @@ def test_init_and_seed_mock_data(tmp_path):
     assert sender01["last_heartbeat_at"] is None
 
 
+def test_ensure_agent_slots_resets_legacy_placeholder_heartbeat(tmp_path):
+    db_path = tmp_path / "33income.db"
+    db = Database(str(db_path))
+    db.init_db()
+
+    with db._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agents (
+                pc_id, hostname, ip_address, status, agent_version,
+                assigned_bot_ids, last_heartbeat_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "pc-01",
+                "WIN-PC-01",
+                "192.168.10.101",
+                "online",
+                "0.1.0",
+                "sender-01",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO bots (
+                bot_id, bot_type, pc_id, status, profile_dir,
+                last_heartbeat_at, current_step, success_count,
+                failure_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "sender-01",
+                "sender",
+                "pc-01",
+                "running",
+                "profiles\\sender-01",
+                "2026-01-01T00:00:00+00:00",
+                "".join(("mo", "ck_cycle")),
+                7,
+                3,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    db.ensure_agent_slots(agent_count=18)
+
+    agent = db.get_agent("pc-01")
+    assert agent is not None
+    assert agent["status"] == "offline"
+    assert agent["last_heartbeat_at"] is None
+
+    bot = db.get_bot("sender-01")
+    assert bot is not None
+    assert bot["status"] == "connection_required"
+    assert bot["current_step"] == "접속필요"
+    assert bot["last_heartbeat_at"] is None
+    assert bot["success_count"] == 0
+    assert bot["failure_count"] == 0
+
+
 def test_enqueue_and_poll_commands(tmp_path):
     db_path = tmp_path / "33income.db"
     db = Database(str(db_path))
     db.init_db()
-    db.seed_mock_data(agent_count=18)
+    db.ensure_agent_slots(agent_count=18)
 
     command = db.enqueue_command(pc_id="pc-01", bot_id="sender-01", command="open_login")
 
@@ -59,7 +121,7 @@ def test_db_status_mapping_for_new_login_and_refresh_commands(tmp_path):
     db_path = tmp_path / "33income.db"
     db = Database(str(db_path))
     db.init_db()
-    db.seed_mock_data(agent_count=18)
+    db.ensure_agent_slots(agent_count=18)
 
     fill = db.enqueue_command(pc_id="pc-01", bot_id="sender-01", command="fill_login")
     bot = db.get_bot("sender-01")

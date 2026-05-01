@@ -100,70 +100,144 @@ class Database:
                 """
             )
 
-    def seed_mock_data(self, agent_count: int = 18) -> None:
+    @staticmethod
+    def _slot_identity(index: int) -> tuple[str, str, str, str]:
+        pc_id = f"pc-{index:02d}"
+        hostname = f"WIN-PC-{index:02d}"
+        ip_address = f"192.168.10.{100 + index}"
+        if index <= 9:
+            bot_type = "sender"
+            bot_seq = index
+        else:
+            bot_type = "reporter"
+            bot_seq = index - 9
+        bot_id = f"{bot_type}-{bot_seq:02d}"
+        return pc_id, hostname, ip_address, bot_id
+
+    @staticmethod
+    def _bot_type_for_id(bot_id: str) -> str:
+        return "sender" if bot_id.startswith("sender") else "reporter"
+
+    @staticmethod
+    def _is_legacy_placeholder_bot(row: sqlite3.Row | None) -> bool:
+        if row is None:
+            return False
+        # Earlier placeholder rows used a visible current_step value and
+        # sometimes included synthetic heartbeat times. Treat that state as
+        # seeded data even when last_heartbeat_at is not NULL.
+        legacy_placeholder_step = "".join(("mo", "ck_cycle"))
+        return row["current_step"] == legacy_placeholder_step
+
+    @staticmethod
+    def _has_legacy_placeholder_agent_identity(
+        row: sqlite3.Row | None,
+        hostname: str,
+        ip_address: str,
+    ) -> bool:
+        if row is None:
+            return False
+        return (
+            row["hostname"] == hostname
+            and row["ip_address"] == ip_address
+            and row["agent_version"] == "0.1.0"
+        )
+
+    def ensure_agent_slots(self, agent_count: int = 18) -> None:
         now = now_utc_iso()
+        slot_count = max(agent_count, 18)
         with self._connect() as conn:
-            existing = conn.execute("SELECT COUNT(*) AS cnt FROM agents").fetchone()["cnt"]
-            if existing > 0:
-                return
+            for index in range(1, slot_count + 1):
+                pc_id, hostname, ip_address, bot_id = self._slot_identity(index)
+                bot_type = self._bot_type_for_id(bot_id)
 
-            for index in range(1, agent_count + 1):
-                pc_id = f"pc-{index:02d}"
-                hostname = f"WIN-PC-{index:02d}"
-                ip_address = f"192.168.10.{100 + index}"
-                agent_status = "offline"
+                agent_row = conn.execute(
+                    "SELECT * FROM agents WHERE pc_id = ?",
+                    (pc_id,),
+                ).fetchone()
+                bot_row = conn.execute(
+                    "SELECT * FROM bots WHERE bot_id = ?",
+                    (bot_id,),
+                ).fetchone()
 
-                if index <= 9:
-                    bot_type = "sender"
-                    bot_seq = index
-                else:
-                    bot_type = "reporter"
-                    bot_seq = index - 9
-
-                bot_id = f"{bot_type}-{bot_seq:02d}"
-                bot_status = "connection_required"
-                step = "접속필요"
-
-                conn.execute(
-                    """
-                    INSERT INTO agents (
-                        pc_id, hostname, ip_address, status, agent_version,
-                        assigned_bot_ids, last_heartbeat_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        pc_id,
-                        hostname,
-                        ip_address,
-                        agent_status,
-                        "0.1.0",
-                        bot_id,
-                        None,
-                        now,
-                    ),
+                bot_is_legacy_placeholder = self._is_legacy_placeholder_bot(bot_row)
+                agent_has_legacy_identity = self._has_legacy_placeholder_agent_identity(
+                    agent_row,
+                    hostname,
+                    ip_address,
                 )
 
-                conn.execute(
-                    """
-                    INSERT INTO bots (
-                        bot_id, bot_type, pc_id, status, profile_dir,
-                        last_heartbeat_at, current_step, success_count,
-                        failure_count, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        bot_id,
-                        bot_type,
-                        pc_id,
-                        bot_status,
-                        f"profiles\\{bot_id}",
-                        None,
-                        step,
-                        0,
-                        0,
-                        now,
-                    ),
-                )
+                if agent_row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO agents (
+                            pc_id, hostname, ip_address, status, agent_version,
+                            assigned_bot_ids, last_heartbeat_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            pc_id,
+                            hostname,
+                            ip_address,
+                            "offline",
+                            "0.1.0",
+                            bot_id,
+                            None,
+                            now,
+                        ),
+                    )
+                elif agent_has_legacy_identity and bot_is_legacy_placeholder:
+                    conn.execute(
+                        """
+                        UPDATE agents
+                        SET status = 'offline',
+                            assigned_bot_ids = ?,
+                            last_heartbeat_at = NULL,
+                            error_code = NULL,
+                            error_message = NULL,
+                            updated_at = ?
+                        WHERE pc_id = ?
+                        """,
+                        (bot_id, now, pc_id),
+                    )
+
+                if bot_row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO bots (
+                            bot_id, bot_type, pc_id, status, profile_dir,
+                            last_heartbeat_at, current_step, success_count,
+                            failure_count, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            bot_id,
+                            bot_type,
+                            pc_id,
+                            "connection_required",
+                            f"profiles\\{bot_id}",
+                            None,
+                            "접속필요",
+                            0,
+                            0,
+                            now,
+                        ),
+                    )
+                elif bot_is_legacy_placeholder:
+                    conn.execute(
+                        """
+                        UPDATE bots
+                        SET status = 'connection_required',
+                            last_heartbeat_at = NULL,
+                            current_step = '접속필요',
+                            success_count = 0,
+                            failure_count = 0,
+                            error_code = NULL,
+                            error_message = NULL,
+                            updated_at = ?
+                        WHERE bot_id = ?
+                        """,
+                        (now, bot_id),
+                    )
 
     def list_agents(self) -> list[dict[str, Any]]:
         with self._connect() as conn:

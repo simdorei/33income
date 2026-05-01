@@ -1,6 +1,6 @@
 # CONTROL_TOWER
 
-`income33.control_tower.app`는 Windows 관제 PC에서 실행하는 mock 관제 서버입니다.
+`income33.control_tower.app`는 Windows 관제 PC에서 실행하는 관제 서버입니다.
 
 ## 실행
 
@@ -42,13 +42,14 @@ INCOME33_LOG_DIR=logs
 
 - `http://127.0.0.1:8330`
 
-## mock 초기 데이터
+## 고정 슬롯 초기화
 
 - agents 18대 (`pc-01` ~ `pc-18`)
 - bots 18대
   - sender 9대 (`sender-01` ~ `sender-09`)
   - reporter 9대 (`reporter-01` ~ `reporter-09`)
-- 초기 상태는 절반 online/절반 offline mock으로 시드됨
+- 초기 상태는 모두 `offline` / `connection_required` / `접속필요`입니다.
+- 실제 agent heartbeat가 들어오면 `last_heartbeat_at`이 갱신되고 해당 PC/봇 상태가 연결 상태로 전환됩니다.
 
 ## API
 
@@ -97,4 +98,4 @@ INCOME33_LOG_DIR=logs
 - 인증코드는 명령 payload로 전달되지만 대시보드/로그에 평문으로 재출력하지 않습니다.
 - 서버/CI 검증에서는 `INCOME33_BROWSER_CONTROL_DRY_RUN=1`로 실제 브라우저 없이 흐름 검증이 가능합니다.
 
-현재는 mock UI/JSON 확인 목적이며, 실제 업무 자동화 제어는 후속 단계입니다.
+현재는 관제 UI/JSON 및 명령 큐 확인 목적이며, 실제 업무 자동화 범위는 단계적으로 확장합니다.

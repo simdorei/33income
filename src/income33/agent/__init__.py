@@ -1,1 +1,1 @@
-"""Local Windows agent for 33income mock runtime."""
+"""Local Windows agent for the 33income runtime."""

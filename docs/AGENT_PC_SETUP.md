@@ -94,7 +94,7 @@ run_agent.bat
 
 agent 동작:
 
-1. bot mock 상태 tick + heartbeat
+1. bot 현재 상태 tick + heartbeat
 2. 명령 큐 poll (`start/stop/restart/status/open_login/fill_login/submit_auth_code/refresh_page/login_done`)
 3. keepalive 활성화 시(`INCOME33_REFRESH_ENABLED=1`) 600초 기본 주기로 `INCOME33_REFRESH_URL` 새로고침
 4. 처리 완료 ack
