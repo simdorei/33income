@@ -54,6 +54,8 @@ class ControlTowerService:
         bot = self.db.get_bot(bot_id)
         if bot is None:
             raise KeyError(f"bot not found: {bot_id}")
+        if command == "send_expected_tax_amounts" and bot.get("bot_type") != "sender":
+            raise ValueError("send_expected_tax_amounts is only allowed for sender bots")
 
         queued = self.db.enqueue_command(
             pc_id=bot["pc_id"],

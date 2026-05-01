@@ -197,6 +197,35 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monkeypatch):
+    monotonic_points = iter([1000.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "계산발송 완료"}
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, _ = build_runner(
+        [
+            {
+                "id": 18,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"tax_doc_ids": [1360165]}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_ids": [1360165]}}]
+
+
 def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
     monotonic_points = iter([1000.0, 1299.0, 1300.0])
     calls = []

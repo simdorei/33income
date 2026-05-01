@@ -752,7 +752,14 @@ def _tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
         raw_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
     if not isinstance(raw_ids, list):
         raise ValueError("tax_doc_ids must be a list or comma-separated string")
-    tax_doc_ids = [int(tax_doc_id) for tax_doc_id in raw_ids]
+    tax_doc_ids: list[int] = []
+    for raw_id in raw_ids:
+        if isinstance(raw_id, bool):
+            raise ValueError("tax_doc_ids must contain positive integers")
+        tax_doc_id = int(raw_id)
+        if tax_doc_id <= 0:
+            raise ValueError("tax_doc_ids must contain positive integers")
+        tax_doc_ids.append(tax_doc_id)
     return list(dict.fromkeys(tax_doc_ids))
 
 

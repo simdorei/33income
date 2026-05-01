@@ -53,15 +53,25 @@ def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     return f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
 
 
-def _command_button(bot_id: str, command: str, label: str, css_class: str = "") -> str:
+def _command_button(
+    bot_id: str,
+    command: str,
+    label: str,
+    css_class: str = "",
+    confirm_message: str | None = None,
+) -> str:
     safe_bot_id = escape(bot_id, quote=True)
     safe_command = escape(command, quote=True)
     safe_label = escape(label)
     safe_class = escape(css_class, quote=True)
+    confirm_attr = ""
+    if confirm_message:
+        safe_confirm = escape(confirm_message, quote=True)
+        confirm_attr = f" onclick=\"return confirm('{safe_confirm}')\""
     return (
         f"<form method='post' action='/ui/bots/{safe_bot_id}/commands/{safe_command}' "
         "style='display:inline'>"
-        f"<button class='{safe_class}' type='submit'>{safe_label}</button>"
+        f"<button class='{safe_class}' type='submit'{confirm_attr}>{safe_label}</button>"
         "</form>"
     )
 
@@ -86,10 +96,23 @@ def _bot_actions_html(bot_id: str) -> str:
         _command_button(bot_id, "fill_login", "로그인 입력", "login"),
         _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
         _command_button(bot_id, "preview_send_targets", "목록조회 테스트", "refresh"),
-        _command_button(bot_id, "send_expected_tax_amounts", "계산발송", "send"),
-        _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
-        _submit_auth_code_form(bot_id),
     ]
+    if bot_id.startswith("sender-"):
+        buttons.append(
+            _command_button(
+                bot_id,
+                "send_expected_tax_amounts",
+                "계산발송",
+                "send",
+                "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?",
+            )
+        )
+    buttons.extend(
+        [
+            _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
+            _submit_auth_code_form(bot_id),
+        ]
+    )
     return " ".join(buttons)
 
 
@@ -274,6 +297,9 @@ def create_app(
         except KeyError as exc:
             logger.warning("queue_command_not_found bot_id=%s", bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            logger.warning("queue_command_rejected bot_id=%s command=%s reason=%s", bot_id, body.command, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return command
 
     @app.post("/ui/bots/{bot_id}/commands/{command}")
@@ -285,6 +311,9 @@ def create_app(
         except KeyError as exc:
             logger.warning("queue_command_not_found bot_id=%s command=%s", bot_id, command)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            logger.warning("queue_command_rejected bot_id=%s command=%s reason=%s", bot_id, command, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 
     @app.post("/ui/bots/{bot_id}/auth-code")

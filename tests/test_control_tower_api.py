@@ -50,6 +50,19 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" in root.text
     assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "return confirm" in root.text
+    assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
+
+
+def test_api_rejects_send_expected_tax_amounts_for_reporter_bot(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/reporter-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {}},
+    )
+    assert queued.status_code == 400
+    assert "only allowed for sender" in queued.text
 
 
 def test_api_can_queue_send_expected_tax_amounts_command(tmp_path):

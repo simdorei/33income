@@ -54,6 +54,14 @@ def _resolve_send_repeat_interval_seconds() -> int:
         return 300
 
 
+def _payload_has_explicit_tax_doc_ids(payload: dict[str, Any]) -> bool:
+    for key in ("tax_doc_ids", "taxDocIds", "taxDocIdSet"):
+        value = payload.get(key)
+        if value:
+            return True
+    return False
+
+
 def _build_bot_runner(agent: AgentConfig):
     if agent.bot_type == "reporter":
         return ReporterBotRunner(bot_id=agent.bot_id)
@@ -208,6 +216,9 @@ class AgentRunner:
     def _run_repeated_send_if_due(self) -> None:
         if self._repeat_send_payload is None or self._next_repeated_send_monotonic is None:
             return
+        if self.bot.status != "session_active":
+            self._cancel_repeated_send()
+            return
         now = self._monotonic()
         if now < self._next_repeated_send_monotonic:
             return
@@ -318,6 +329,7 @@ class AgentRunner:
                     str(result.get("current_step") or "목록조회 테스트 완료"),
                 )
             elif command_name == "send_expected_tax_amounts":
+                self._cancel_repeated_send()
                 self._set_bot_state("session_active", "계산발송 중")
                 result = send_expected_tax_amounts(
                     bot_id=self.agent.bot_id,
@@ -328,7 +340,8 @@ class AgentRunner:
                     str(result.get("status") or "session_active"),
                     str(result.get("current_step") or "계산발송 완료"),
                 )
-                self._schedule_repeated_send(payload)
+                if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
+                    self._schedule_repeated_send(payload)
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)

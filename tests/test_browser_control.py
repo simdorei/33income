@@ -174,6 +174,21 @@ def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
     assert result["tax_doc_ids"] == [11, 12]
 
 
+def test_send_expected_tax_amounts_rejects_invalid_tax_doc_ids(monkeypatch):
+    monkeypatch.setenv("INCOME33_BROWSER_CONTROL_DRY_RUN", "1")
+
+    for bad_ids in ([0], [-1], [True]):
+        try:
+            browser_control.send_expected_tax_amounts(
+                bot_id="sender-01",
+                payload={"tax_doc_ids": bad_ids},
+            )
+        except ValueError as exc:
+            assert "positive integers" in str(exc)
+        else:  # pragma: no cover - explicit assertion branch
+            raise AssertionError(f"invalid ids should fail: {bad_ids}")
+
+
 def test_send_expected_tax_amounts_dry_run_does_not_post(monkeypatch):
     monkeypatch.setenv("INCOME33_BROWSER_CONTROL_DRY_RUN", "1")
 
