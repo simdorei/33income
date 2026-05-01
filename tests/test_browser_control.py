@@ -174,6 +174,56 @@ def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
     assert result["tax_doc_ids"] == [11, 12]
 
 
+def test_assign_taxdocs_to_current_accountant_fetches_me_then_puts_assignment(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            assert method == "GET"
+            assert headers["x-host"] == "GROUND"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        assert url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign")
+        assert method == "PUT"
+        assert headers["x-host"] == "GIT"
+        assert json_body == {"taxAccountantId": 817, "taxDocIdList": [1358717, 1360207]}
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": True, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.assign_taxdocs_to_current_accountant(
+        bot_id="sender-01",
+        tax_doc_ids=[1358717, 1360207],
+        payload={},
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "PUT"]
+    assert result["assigned_count"] == 2
+    assert result["tax_accountant_id"] == 817
+    assert result["current_step"] == "잔여목록 배정 완료 2건 담당자=817 status=200"
+
+
+def test_assign_taxdocs_to_current_accountant_dry_run_skips_fetch_and_put(monkeypatch):
+    def _fail_fetch(*args, **kwargs):
+        raise AssertionError("dry run should not fetch")
+
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", _fail_fetch)
+
+    result = browser_control.assign_taxdocs_to_current_accountant(
+        bot_id="sender-01",
+        tax_doc_ids=[1001, 1002],
+        payload={"dry_run": True},
+    )
+
+    assert result["dry_run"] is True
+    assert result["assigned_count"] == 2
+    assert result["current_step"] == "잔여목록 배정 dry-run 2건"
+
+
 def test_send_expected_tax_amounts_rejects_invalid_tax_doc_ids(monkeypatch):
     monkeypatch.setenv("INCOME33_BROWSER_CONTROL_DRY_RUN", "1")
 

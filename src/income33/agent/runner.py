@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable
 
 from income33.agent.browser_control import (
+    assign_taxdocs_to_current_accountant,
     fill_login,
     inspect_login_state,
     is_keepalive_due,
@@ -86,6 +87,7 @@ class AgentRunner:
         self._persistent_step: str | None = None
         self._repeat_send_payload: dict[str, Any] | None = None
         self._next_repeated_send_monotonic: float | None = None
+        self._repeat_send_attempt_counts: dict[int, int] = {}
 
     @staticmethod
     def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +202,7 @@ class AgentRunner:
         interval = _resolve_send_repeat_interval_seconds()
         self._repeat_send_payload = dict(payload)
         self._next_repeated_send_monotonic = self._monotonic() + interval
+        self._repeat_send_attempt_counts = {}
         self.logger.info(
             "send_repeat_scheduled bot_id=%s interval=%s",
             self.agent.bot_id,
@@ -212,6 +215,25 @@ class AgentRunner:
         self.logger.info("send_repeat_cancelled bot_id=%s", self.agent.bot_id)
         self._repeat_send_payload = None
         self._next_repeated_send_monotonic = None
+        self._repeat_send_attempt_counts = {}
+
+    @staticmethod
+    def _track_repeat_send_attempts(
+        attempt_counts: dict[int, int],
+        tax_doc_ids: list[int],
+    ) -> list[int]:
+        fallback_tax_doc_ids: list[int] = []
+        for raw_tax_doc_id in tax_doc_ids:
+            if isinstance(raw_tax_doc_id, bool):
+                continue
+            tax_doc_id = int(raw_tax_doc_id)
+            if tax_doc_id <= 0:
+                continue
+            next_attempt = attempt_counts.get(tax_doc_id, 0) + 1
+            attempt_counts[tax_doc_id] = next_attempt
+            if next_attempt >= 3:
+                fallback_tax_doc_ids.append(tax_doc_id)
+        return fallback_tax_doc_ids
 
     def _run_repeated_send_if_due(self) -> None:
         if self._repeat_send_payload is None or self._next_repeated_send_monotonic is None:
@@ -239,6 +261,29 @@ class AgentRunner:
             self._send_current_state_heartbeat()
             self.logger.exception("send_repeat_failed bot_id=%s", self.agent.bot_id)
             return
+
+        fallback_tax_doc_ids = self._track_repeat_send_attempts(
+            self._repeat_send_attempt_counts,
+            list(result.get("tax_doc_ids") or []),
+        )
+        if fallback_tax_doc_ids:
+            try:
+                assign_result = assign_taxdocs_to_current_accountant(
+                    bot_id=self.agent.bot_id,
+                    tax_doc_ids=fallback_tax_doc_ids,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+            except Exception as exc:
+                self._cancel_repeated_send()
+                self._set_bot_state("manual_required", f"잔여목록 배정 실패: {exc}")
+                self._send_current_state_heartbeat()
+                self.logger.exception("send_repeat_assignment_failed bot_id=%s", self.agent.bot_id)
+                return
+
+            for tax_doc_id in fallback_tax_doc_ids:
+                self._repeat_send_attempt_counts.pop(tax_doc_id, None)
+            result = assign_result
 
         self._set_bot_state(
             str(result.get("status") or "session_active"),
@@ -345,6 +390,10 @@ class AgentRunner:
                 )
                 if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
                     self._schedule_repeated_send(payload)
+                    self._track_repeat_send_attempts(
+                        self._repeat_send_attempt_counts,
+                        list(result.get("tax_doc_ids") or []),
+                    )
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)

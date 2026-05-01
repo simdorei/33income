@@ -748,6 +748,10 @@ def preview_expected_tax_send_targets(
 
 def _tax_doc_ids_from_payload(payload: dict[str, Any]) -> list[int]:
     raw_ids = payload.get("tax_doc_ids") or payload.get("taxDocIds") or payload.get("taxDocIdSet") or []
+    return _normalize_tax_doc_ids(raw_ids)
+
+
+def _normalize_tax_doc_ids(raw_ids: Any) -> list[int]:
     if isinstance(raw_ids, str):
         raw_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
     if not isinstance(raw_ids, list):
@@ -836,6 +840,93 @@ def send_expected_tax_amounts(
         "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s",
         bot_id,
         result.get("sent_count"),
+        result.get("status_code"),
+    )
+    return result
+
+
+def assign_taxdocs_to_current_accountant(
+    *,
+    bot_id: str,
+    tax_doc_ids: list[int],
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    normalized_tax_doc_ids = _normalize_tax_doc_ids(tax_doc_ids)
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"잔여목록 배정 dry-run {len(normalized_tax_doc_ids)}건",
+            "assigned_count": len(normalized_tax_doc_ids),
+            "tax_doc_ids": normalized_tax_doc_ids,
+        }
+
+    if not normalized_tax_doc_ids:
+        raise RuntimeError("no taxDocId values to assign")
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    me_url = f"{api_base_url}/api/ta/v1/me"
+    assign_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/tax-accountants/assign"
+
+    me_headers = {
+        "accept": "application/json",
+        "x-host": "GROUND",
+        "x-web-path": "dashboard/default",
+    }
+    assign_headers = {
+        "accept": "application/json",
+        "x-host": "GIT",
+        "x-web-path": "tasks/git/default",
+    }
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        me_response = _browser_fetch_json(page, url=me_url, method="GET", headers=me_headers)
+        me_json = me_response.get("json") or {}
+        me_data = me_json.get("data") or {}
+        raw_tax_accountant_id = me_data.get("id")
+        if isinstance(raw_tax_accountant_id, bool):
+            raise RuntimeError(f"me lookup failed status={me_response.get('status')}")
+        tax_accountant_id = int(raw_tax_accountant_id or 0)
+        if not me_response.get("ok") or not me_json.get("ok") or tax_accountant_id <= 0:
+            raise RuntimeError(f"me lookup failed status={me_response.get('status')}")
+
+        assign_response = _browser_fetch_json(
+            page,
+            url=assign_url,
+            method="PUT",
+            headers=assign_headers,
+            json_body={"taxAccountantId": int(tax_accountant_id), "taxDocIdList": normalized_tax_doc_ids},
+        )
+        assign_json = assign_response.get("json") or {}
+        if not assign_response.get("ok") or not assign_json.get("ok"):
+            raise RuntimeError(f"assignment failed status={assign_response.get('status')}")
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": (
+                f"잔여목록 배정 완료 {len(normalized_tax_doc_ids)}건 "
+                f"담당자={int(tax_accountant_id)} status={assign_response.get('status')}"
+            ),
+            "debug_port": debug_port,
+            "status_code": assign_response.get("status"),
+            "tax_accountant_id": int(tax_accountant_id),
+            "assigned_count": len(normalized_tax_doc_ids),
+            "tax_doc_ids": normalized_tax_doc_ids,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "assign_taxdocs_to_current_accountant_done bot_id=%s count=%s tax_accountant_id=%s status_code=%s",
+        bot_id,
+        result.get("assigned_count"),
+        result.get("tax_accountant_id"),
         result.get("status_code"),
     )
     return result
