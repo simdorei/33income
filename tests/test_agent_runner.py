@@ -304,6 +304,49 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2 / 다음발송 300초 후"
 
 
+def test_runner_ignores_false_auth_probe_while_repeat_send_is_scheduled(monkeypatch):
+    monotonic_points = iter([1000.0, 1299.0, 1299.0, 1300.0, 1300.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": f"계산발송 완료 #{len(calls)}",
+        }
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        return {"status": "login_auth_required", "current_step": "인증코드 입력 대기"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [
+            {
+                "id": 24,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "size": 20}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+    assert client.heartbeats[-1]["bot_status"] == "session_active"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #1 / 다음발송 1초 후"
+    runner.run_once()
+
+    assert calls == [
+        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
+        {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
+    ]
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2 / 다음발송 300초 후"
+
+
 def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monkeypatch):
     monotonic_points = iter([1000.0, 1300.0, 1300.0])
     send_calls = []

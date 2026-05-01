@@ -179,8 +179,17 @@ class AgentRunner:
         )
         if not result:
             return
+        result_status = str(result.get("status") or self.bot.status)
+        if self._repeat_send_payload is not None and self.bot.status == "session_active" and result_status != "session_active":
+            self.logger.info(
+                "login_probe_ignored_during_send_repeat bot_id=%s probed_status=%s step=%s",
+                self.agent.bot_id,
+                result_status,
+                result.get("current_step"),
+            )
+            return
         self._set_bot_state(
-            str(result.get("status") or self.bot.status),
+            result_status,
             str(result.get("current_step") or self.bot.status),
         )
 
