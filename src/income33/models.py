@@ -33,6 +33,7 @@ CommandType = Literal[
     "fill_login",
     "submit_auth_code",
     "refresh_page",
+    "preview_send_targets",
 ]
 CommandStatus = Literal["pending", "running", "done", "failed"]
 

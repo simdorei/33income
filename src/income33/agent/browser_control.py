@@ -8,11 +8,14 @@ import subprocess
 import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 DEFAULT_LOGIN_URL = "https://newta.3o3.co.kr/login?r=%2F"
 DEFAULT_REFRESH_URL = "https://newta.3o3.co.kr/tasks/git"
+DEFAULT_API_BASE_URL = "https://ta-gw.3o3.co.kr"
 DEFAULT_DEBUG_PORT_BASE = 29200
 DEFAULT_REFRESH_INTERVAL_SECONDS = 600
+DEFAULT_TAXDOC_YEAR = 2025
 
 WINDOWS_BROWSER_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -521,6 +524,179 @@ def inspect_login_state(
             result.get("current_step"),
             result.get("url"),
         )
+    return result
+
+
+def _resolve_tax_api_base_url(payload: dict[str, Any] | None = None) -> str:
+    payload = payload or {}
+    return str(payload.get("api_base_url") or os.getenv("INCOME33_TAX_API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
+
+
+def _resolve_taxdoc_year(payload: dict[str, Any] | None = None) -> int:
+    payload = payload or {}
+    if payload.get("year"):
+        return int(payload["year"])
+    return _env_int("INCOME33_TAXDOC_YEAR", DEFAULT_TAXDOC_YEAR)
+
+
+def _resolve_taxdoc_page_size(payload: dict[str, Any] | None = None) -> int:
+    payload = payload or {}
+    if payload.get("size"):
+        return max(1, min(100, int(payload["size"])))
+    return max(1, min(100, _env_int("INCOME33_TAXDOC_PAGE_SIZE", 20)))
+
+
+def _taxdoc_filter_search_url(
+    *,
+    api_base_url: str,
+    office_id: int,
+    year: int,
+    page: int,
+    size: int,
+) -> str:
+    params = {
+        "officeId": office_id,
+        "workflowFilterSet": "ASSIGN_WAITING",
+        "assignmentStatusFilter": "ALL",
+        "taxDocCustomTypeFilter": "ALL",
+        "businessIncomeTypeFilter": "ALL",
+        "freelancerIncomeAmountTypeFilter": "ALL",
+        "reviewTypeFilter": "ALL",
+        "submitGuideTypeFilter": "ALL",
+        "applyExpenseRateTypeFilter": "ALL",
+        "noticeTypeFilter": "ALL",
+        "extraSurveyTypeFilter": "ALL",
+        "expectedTaxAmountTypeFilter": "ALL",
+        "refundStatusFilter": "ALL",
+        "taxDocServiceCodeTypeFilter": "C0",
+        "year": year,
+        "sort": "REVIEW_REQUEST_DATE_TIME",
+        "direction": "DESC",
+        "page": page,
+        "size": size,
+    }
+    return f"{api_base_url}/api/tax/v1/taxdocs/filter-search?{urlencode(params)}"
+
+
+def _browser_fetch_json(page: Any, *, url: str, method: str = "GET", headers: dict[str, str] | None = None) -> dict[str, Any]:
+    return page.evaluate(
+        """
+        async ({url, method, headers}) => {
+          const response = await fetch(url, {
+            method,
+            headers,
+            credentials: 'include',
+          });
+          const text = await response.text();
+          let json = null;
+          try { json = text ? JSON.parse(text) : null; } catch (e) {}
+          return {
+            ok: response.ok,
+            status: response.status,
+            url: response.url,
+            json,
+            text: json ? null : text.slice(0, 500),
+          };
+        }
+        """,
+        {"url": url, "method": method, "headers": headers or {}},
+    )
+
+
+def preview_expected_tax_send_targets(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    year = _resolve_taxdoc_year(payload)
+    size = _resolve_taxdoc_page_size(payload)
+    page_index = max(0, int(payload.get("page", 0)))
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"목록조회 테스트 dry-run year={year} size={size}",
+        }
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    web_path = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/tasks/git")
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(web_path, wait_until="domcontentloaded")
+
+        office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+        common_headers = {
+            "accept": "application/json, text/plain, */*",
+            "x-web-path": web_path,
+        }
+        office_response = _browser_fetch_json(
+            page,
+            url=office_url,
+            headers={**common_headers, "x-host": "GROUND"},
+        )
+        office_json = office_response.get("json") or {}
+        if not office_response.get("ok") or not office_json.get("ok"):
+            raise RuntimeError(f"office lookup failed status={office_response.get('status')}")
+        offices = office_json.get("data") or []
+        if not offices:
+            raise RuntimeError("office lookup returned no offices")
+        office_id = int(payload.get("office_id") or offices[0]["id"])
+
+        list_url = _taxdoc_filter_search_url(
+            api_base_url=api_base_url,
+            office_id=office_id,
+            year=year,
+            page=page_index,
+            size=size,
+        )
+        list_response = _browser_fetch_json(
+            page,
+            url=list_url,
+            headers={**common_headers, "x-host": "GIT"},
+        )
+        list_json = list_response.get("json") or {}
+        if not list_response.get("ok") or not list_json.get("ok"):
+            raise RuntimeError(f"taxdoc list failed status={list_response.get('status')}")
+        data = list_json.get("data") or {}
+        content = data.get("content") or []
+        tax_doc_ids = [int(row["taxDocId"]) for row in content if row.get("taxDocId") is not None]
+        total_elements = int(data.get("totalElements") or len(tax_doc_ids))
+        total_pages = int(data.get("totalPages") or 1)
+        current_step = (
+            f"목록조회 테스트 {len(tax_doc_ids)}/{total_elements}건 "
+            f"현재 {page_index + 1}/{total_pages}페이지 총 {total_pages}페이지 officeId={office_id}"
+        )
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": current_step,
+            "debug_port": debug_port,
+            "office_id": office_id,
+            "year": year,
+            "page": page_index,
+            "size": size,
+            "total_elements": total_elements,
+            "total_pages": total_pages,
+            "count": len(tax_doc_ids),
+            "tax_doc_ids": tax_doc_ids,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "preview_expected_tax_send_targets_done bot_id=%s office_id=%s page=%s count=%s total=%s",
+        bot_id,
+        result.get("office_id"),
+        result.get("page"),
+        result.get("count"),
+        result.get("total_elements"),
+    )
     return result
 
 

@@ -27,6 +27,7 @@ DASHBOARD_ALLOWED_COMMANDS = {
     "login_done",
     "fill_login",
     "refresh_page",
+    "preview_send_targets",
 }
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
@@ -83,6 +84,7 @@ def _bot_actions_html(bot_id: str) -> str:
         _command_button(bot_id, "open_login", "로그인 열기", "login"),
         _command_button(bot_id, "fill_login", "로그인 입력", "login"),
         _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
+        _command_button(bot_id, "preview_send_targets", "목록조회 테스트", "refresh"),
         _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
         _submit_auth_code_form(bot_id),
     ]

@@ -136,6 +136,38 @@ def test_runner_handles_submit_auth_code_command(monkeypatch):
     assert runner.bot.status == "session_active"
 
 
+def test_runner_handles_preview_send_targets_command(monkeypatch):
+    calls = []
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": "목록조회 테스트 20/274건 현재 1/14페이지 총 14페이지 officeId=325",
+        }
+
+    monkeypatch.setattr(
+        "income33.agent.runner.preview_expected_tax_send_targets",
+        fake_preview_expected_tax_send_targets,
+    )
+    runner, client = build_runner(
+        [
+            {
+                "id": 12,
+                "command": "preview_send_targets",
+                "payload_json": json.dumps({"year": 2025, "size": 20}),
+            }
+        ]
+    )
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}}]
+    assert client.completed == [{"command_id": 12, "status": "done", "error_message": None}]
+    assert runner.bot.status == "session_active"
+    assert client.heartbeats[-1]["current_step"] == "목록조회 테스트 20/274건 현재 1/14페이지 총 14페이지 officeId=325"
+
+
 def test_runner_handles_login_done_command():
     runner, client = build_runner([{"id": 8, "command": "login_done", "payload_json": "{}"}])
 

@@ -11,6 +11,7 @@ from income33.agent.browser_control import (
     inspect_login_state,
     is_keepalive_due,
     is_refresh_enabled,
+    preview_expected_tax_send_targets,
     refresh_page,
     resolve_refresh_interval_seconds,
     submit_auth_code,
@@ -219,6 +220,17 @@ class AgentRunner:
                 self._set_bot_state(
                     str(result.get("status") or "session_active"),
                     str(result.get("current_step") or "session_refresh"),
+                )
+            elif command_name == "preview_send_targets":
+                self._set_bot_state("session_active", "목록조회 테스트 중")
+                result = preview_expected_tax_send_targets(
+                    bot_id=self.agent.bot_id,
+                    payload=payload,
+                    logger=logging.getLogger("income33.agent.browser_control"),
+                )
+                self._set_bot_state(
+                    str(result.get("status") or "session_active"),
+                    str(result.get("current_step") or "목록조회 테스트 완료"),
                 )
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
