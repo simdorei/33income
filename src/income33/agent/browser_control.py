@@ -648,29 +648,61 @@ def preview_expected_tax_send_targets(
             raise RuntimeError("office lookup returned no offices")
         office_id = int(payload.get("office_id") or offices[0]["id"])
 
-        list_url = _taxdoc_filter_search_url(
-            api_base_url=api_base_url,
-            office_id=office_id,
-            year=year,
-            page=page_index,
-            size=size,
-        )
-        list_response = _browser_fetch_json(
-            page,
-            url=list_url,
-            headers={**common_headers, "x-host": "GIT"},
-        )
-        list_json = list_response.get("json") or {}
-        if not list_response.get("ok") or not list_json.get("ok"):
-            raise RuntimeError(f"taxdoc list failed status={list_response.get('status')}")
-        data = list_json.get("data") or {}
-        content = data.get("content") or []
-        tax_doc_ids = [int(row["taxDocId"]) for row in content if row.get("taxDocId") is not None]
-        total_elements = int(data.get("totalElements") or len(tax_doc_ids))
-        total_pages = int(data.get("totalPages") or 1)
+        def _fetch_taxdoc_page(target_page_index: int) -> dict[str, Any]:
+            list_url = _taxdoc_filter_search_url(
+                api_base_url=api_base_url,
+                office_id=office_id,
+                year=year,
+                page=target_page_index,
+                size=size,
+            )
+            list_response = _browser_fetch_json(
+                page,
+                url=list_url,
+                headers={**common_headers, "x-host": "GIT"},
+            )
+            list_json = list_response.get("json") or {}
+            if not list_response.get("ok") or not list_json.get("ok"):
+                raise RuntimeError(f"taxdoc list failed page={target_page_index + 1} status={list_response.get('status')}")
+            return list_json.get("data") or {}
+
+        first_data = _fetch_taxdoc_page(page_index)
+        total_elements = int(first_data.get("totalElements") or 0)
+        total_pages = int(first_data.get("totalPages") or 1)
+        scan_order = str(payload.get("scan_order") or os.getenv("INCOME33_TAXDOC_SCAN_ORDER") or "reverse").lower()
+        if scan_order in {"forward", "asc", "ascending"}:
+            pages_to_scan = list(range(page_index, max(page_index + 1, total_pages)))
+            scan_order = "forward"
+        else:
+            pages_to_scan = list(range(max(page_index, total_pages - 1), page_index - 1, -1))
+            scan_order = "reverse"
+
+        tax_doc_ids: list[int] = []
+        page_data_cache = {page_index: first_data}
+
+        for target_page_index in pages_to_scan:
+            data = page_data_cache.get(target_page_index)
+            if data is None:
+                data = _fetch_taxdoc_page(target_page_index)
+                page_data_cache[target_page_index] = data
+            content = data.get("content") or []
+            tax_doc_ids.extend(int(row["taxDocId"]) for row in content if row.get("taxDocId") is not None)
+            if not total_elements:
+                total_elements = int(data.get("totalElements") or len(tax_doc_ids))
+            if not total_pages:
+                total_pages = int(data.get("totalPages") or 1)
+
+        if not total_elements:
+            total_elements = len(tax_doc_ids)
+        if not total_pages:
+            total_pages = 1
+        if scan_order == "reverse":
+            scan_label = f"역순 {pages_to_scan[0] + 1}→{pages_to_scan[-1] + 1}/{total_pages}페이지"
+        else:
+            scan_label = f"정순 {pages_to_scan[0] + 1}→{pages_to_scan[-1] + 1}/{total_pages}페이지"
         current_step = (
             f"목록조회 테스트 {len(tax_doc_ids)}/{total_elements}건 "
-            f"현재 {page_index + 1}/{total_pages}페이지 총 {total_pages}페이지 officeId={office_id}"
+            f"{scan_label} 총 {total_pages}페이지 officeId={office_id}"
         )
         return {
             "ok": True,
@@ -681,6 +713,8 @@ def preview_expected_tax_send_targets(
             "office_id": office_id,
             "year": year,
             "page": page_index,
+            "scan_order": scan_order,
+            "pages_scanned": pages_to_scan,
             "size": size,
             "total_elements": total_elements,
             "total_pages": total_pages,
