@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import webbrowser
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+
+from income33.agent.simple_expense_rates import SIMPLE_EXPENSE_RATES
+from income33.logging_utils import resolve_log_dir
 
 DEFAULT_LOGIN_URL = "https://newta.3o3.co.kr/login?r=%2F"
 DEFAULT_REFRESH_URL = "https://newta.3o3.co.kr/tasks/git"
@@ -16,6 +21,24 @@ DEFAULT_API_BASE_URL = "https://ta-gw.3o3.co.kr"
 DEFAULT_DEBUG_PORT_BASE = 29200
 DEFAULT_REFRESH_INTERVAL_SECONDS = 600
 DEFAULT_TAXDOC_YEAR = 2025
+ZERO_BUSINESS_NUMBER = "000-00-00000"
+CARD_USAGE_KEYS = (
+    "신용카드등_신용카드",
+    "신용카드등_직불카드",
+    "신용카드등_현금영수증",
+)
+ELIGIBLE_EXPENSE_KEYS = (
+    "세금계산서",
+    "계산서",
+    "현금영수증",
+    "사업용_신용카드",
+    "화물운전자_복지카드",
+    "인건비",
+    "사회보험료",
+    "이자상환액",
+    "기부금",
+    "감가상각비",
+)
 
 WINDOWS_BROWSER_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -852,6 +875,707 @@ def send_expected_tax_amounts(
     return result
 
 
+def _money_decimal(value: Any) -> Decimal:
+    if value is None or value is False or value is True:
+        return Decimal(0)
+    return Decimal(str(value))
+
+
+def _floor_money(value: Decimal | int | float | str) -> int:
+    return int(Decimal(str(value)).to_integral_value(rounding=ROUND_FLOOR))
+
+
+def _sum_amount_list(data: dict[str, Any], keys: tuple[str, ...]) -> int:
+    total = 0
+    for key in keys:
+        for item in data.get(key) or []:
+            total += _floor_money(_money_decimal(item.get("금액")))
+    return total
+
+
+def _sum_eligible_expense(row: dict[str, Any]) -> int:
+    return sum(_floor_money(_money_decimal(row.get(key))) for key in ELIGIBLE_EXPENSE_KEYS)
+
+
+def _rate_for_industry_code(industry_code: Any) -> Decimal:
+    code = str(industry_code or "").strip()
+    if code not in SIMPLE_EXPENSE_RATES:
+        raise RuntimeError(f"missing simple expense rate for industry_code={code}")
+    return Decimal(str(SIMPLE_EXPENSE_RATES[code])).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+
+def _income_items_from_business_incomes(data: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = data.get("summary") or {}
+    raw_items = summary.get("itemList") or []
+    items: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        industry_code = str(raw_item.get("업종코드") or "").strip()
+        business_number = str(raw_item.get("사업자번호") or "").strip()
+        income_amount = _floor_money(_money_decimal(raw_item.get("수입금액")))
+        rate = _rate_for_industry_code(industry_code)
+        items.append(
+            {
+                "business_number": business_number,
+                "industry_code": industry_code,
+                "income_amount": income_amount,
+                "simple_expense_rate": float(rate),
+                "rate_basis_expense_amount": _floor_money(Decimal(income_amount) * rate),
+            }
+        )
+    if not items:
+        raise RuntimeError("business income itemList is empty")
+    return items
+
+
+def _summary_income_amount_from_business_incomes(data: dict[str, Any]) -> int:
+    summary = data.get("summary") or {}
+    summary_sum = summary.get("sum") or {}
+    return _floor_money(_money_decimal(summary_sum.get("수입금액")))
+
+
+def _eligible_expense_by_business_number(expenses_data: dict[str, Any]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for row in expenses_data.get("list") or []:
+        business_number = str(row.get("사업자등록번호") or "").strip()
+        if not business_number:
+            continue
+        totals[business_number] = totals.get(business_number, 0) + _sum_eligible_expense(row)
+    return totals
+
+
+def _business_number_mode(items: list[dict[str, Any]]) -> str:
+    has_zero = any(item["business_number"] == ZERO_BUSINESS_NUMBER for item in items)
+    has_other = any(item["business_number"] != ZERO_BUSINESS_NUMBER for item in items)
+    if has_zero and has_other:
+        return "mixed"
+    if has_zero:
+        return "zero_only"
+    return "general_only"
+
+
+def _expense_for_zero_only(rate_basis_amount: int, summary_income_amount: int, card_usage_amount: int) -> int:
+    if summary_income_amount <= 10_000_000:
+        return _floor_money(Decimal(rate_basis_amount) * Decimal("1.20"))
+    if summary_income_amount <= 20_000_000:
+        return _floor_money(Decimal(rate_basis_amount) * Decimal("1.10"))
+    if summary_income_amount <= 50_000_000:
+        return _floor_money(Decimal(rate_basis_amount) * Decimal("0.98"))
+    if summary_income_amount <= 100_000_000:
+        return min(
+            _floor_money((Decimal(card_usage_amount) + Decimal(40_000_000)) * Decimal("0.98")),
+            _floor_money(Decimal(rate_basis_amount) * Decimal("0.95")),
+        )
+    return min(
+        _floor_money((Decimal(card_usage_amount) + Decimal(50_000_000)) * Decimal("0.98")),
+        _floor_money(Decimal(rate_basis_amount) * Decimal("0.92")),
+    )
+
+
+def _expense_for_general_items(
+    *,
+    rate_basis_amount: int,
+    summary_income_amount: int,
+    eligible_expense_amount: int,
+) -> dict[str, Any]:
+    if summary_income_amount <= 50_000_000:
+        return {
+            "skipped": False,
+            "expense_amount": _floor_money(Decimal(rate_basis_amount) * Decimal("0.98")),
+            "rate_cap_multiplier": Decimal("0.98"),
+        }
+    if summary_income_amount <= 100_000_000:
+        multiplier = Decimal("0.95")
+        addition_limit = _floor_money(Decimal(50_000_000) * Decimal("0.98"))
+    else:
+        multiplier = Decimal("0.92")
+        addition_limit = _floor_money(Decimal(60_000_000) * Decimal("0.98"))
+
+    rate_cap_amount = _floor_money(Decimal(rate_basis_amount) * multiplier)
+    remaining_amount = rate_cap_amount - eligible_expense_amount
+    if remaining_amount < 0:
+        return {
+            "skipped": True,
+            "reason": "eligible_expense_exceeds_rate_cap",
+            "rate_cap_multiplier": float(multiplier),
+            "rate_cap_amount": rate_cap_amount,
+            "eligible_expense_amount": eligible_expense_amount,
+            "excess_amount": eligible_expense_amount - rate_cap_amount,
+            "remaining_amount": remaining_amount,
+        }
+    return {
+        "skipped": False,
+        "expense_amount": eligible_expense_amount + min(addition_limit, remaining_amount),
+        "rate_cap_multiplier": float(multiplier),
+        "rate_cap_amount": rate_cap_amount,
+        "eligible_expense_amount": eligible_expense_amount,
+        "remaining_amount": remaining_amount,
+    }
+
+
+def _calculate_rate_based_total_business_expense(
+    *,
+    business_income_data: dict[str, Any],
+    year_end_document_data: dict[str, Any],
+    expenses_summary_data: dict[str, Any],
+) -> dict[str, Any]:
+    items = _income_items_from_business_incomes(business_income_data)
+    summary_income_amount = _summary_income_amount_from_business_incomes(business_income_data)
+    card_usage_amount = _sum_amount_list(year_end_document_data, CARD_USAGE_KEYS)
+    eligible_by_business_number = _eligible_expense_by_business_number(expenses_summary_data)
+    mode = _business_number_mode(items)
+
+    zero_items = [item for item in items if item["business_number"] == ZERO_BUSINESS_NUMBER]
+    general_items = [item for item in items if item["business_number"] != ZERO_BUSINESS_NUMBER]
+    zero_rate_basis_amount = sum(int(item["rate_basis_expense_amount"]) for item in zero_items)
+    general_rate_basis_amount = sum(int(item["rate_basis_expense_amount"]) for item in general_items)
+    general_business_numbers = {item["business_number"] for item in general_items}
+    general_eligible_expense_amount = sum(
+        eligible_by_business_number.get(business_number, 0)
+        for business_number in general_business_numbers
+    )
+
+    result: dict[str, Any] = {
+        "skipped": False,
+        "business_number_mode": mode,
+        "summary_income_amount": summary_income_amount,
+        "card_usage_amount": card_usage_amount,
+        "eligible_expense_amount": general_eligible_expense_amount,
+        "rate_basis_expense_amount": zero_rate_basis_amount + general_rate_basis_amount,
+        "zero_rate_basis_expense_amount": zero_rate_basis_amount,
+        "general_rate_basis_expense_amount": general_rate_basis_amount,
+        "items": items,
+    }
+
+    if mode == "zero_only":
+        result["total_business_expense_amount"] = _expense_for_zero_only(
+            zero_rate_basis_amount,
+            summary_income_amount,
+            card_usage_amount,
+        )
+        return result
+
+    general_result = _expense_for_general_items(
+        rate_basis_amount=general_rate_basis_amount,
+        summary_income_amount=summary_income_amount,
+        eligible_expense_amount=general_eligible_expense_amount,
+    )
+    result.update(general_result)
+    if general_result.get("skipped"):
+        return result
+
+    zero_expense_amount = 0
+    if mode == "mixed":
+        zero_expense_amount = _floor_money(Decimal(zero_rate_basis_amount) * Decimal("0.95"))
+    result["zero_expense_amount"] = zero_expense_amount
+    result["general_expense_amount"] = int(general_result["expense_amount"])
+    result["total_business_expense_amount"] = zero_expense_amount + int(general_result["expense_amount"])
+    return result
+
+
+def _write_bookkeeping_expense_rate_skip_log(entry: dict[str, Any]) -> None:
+    log_dir = resolve_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "bookkeeping_expense_rate_skips.jsonl"
+    safe_entry = {
+        key: entry.get(key)
+        for key in (
+            "tax_doc_id",
+            "reason",
+            "custom_type",
+            "custom_type_status_code",
+            "current_step",
+        )
+        if key in entry
+    }
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _put_custom_type_da_for_taxdoc(
+    *,
+    page: Any,
+    api_base_url: str,
+    tax_doc_id: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    custom_type_url = f"{api_base_url}/api/tax/v1/taxdocs/{tax_doc_id}/custom-type"
+    response = _browser_fetch_json(
+        page,
+        url=custom_type_url,
+        method="PUT",
+        headers=headers,
+        json_body={"customType": "다"},
+    )
+    response_json = response.get("json") or {}
+    if not response.get("ok") or not response_json.get("ok"):
+        raise RuntimeError(f"custom type update failed status={response.get('status')}")
+    return response
+
+
+def _fetch_required_json_data(page: Any, *, url: str, headers: dict[str, str], label: str) -> dict[str, Any]:
+    response = _browser_fetch_json(page, url=url, headers=headers)
+    response_json = response.get("json") or {}
+    if not response.get("ok") or not response_json.get("ok"):
+        raise RuntimeError(f"{label} failed status={response.get('status')}")
+    return response_json.get("data") or {}
+
+
+def _positive_int_from_payload(payload: dict[str, Any], *keys: str, field_name: str) -> int:
+    for key in keys:
+        if key in payload and payload.get(key) is not None:
+            raw_value = payload.get(key)
+            if isinstance(raw_value, bool):
+                raise ValueError(f"{field_name} must be a positive integer")
+            value = int(raw_value)
+            if value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+            return value
+    raise ValueError(f"{field_name} is required")
+
+
+def _required_int_field(data: dict[str, Any], key: str, *, label: str | None = None) -> int:
+    raw_value = data.get(key)
+    if raw_value is None or isinstance(raw_value, bool):
+        raise RuntimeError(f"missing {label or key}")
+    return int(raw_value)
+
+
+def _bookkeeping_calculation_url(
+    *,
+    api_base_url: str,
+    tax_doc_id: int,
+    submit_account_type: str,
+    additional_expense_amount: int,
+) -> str:
+    params = urlencode(
+        {
+            "submitAccountType": submit_account_type,
+            "additionalExpenseAmount": additional_expense_amount,
+        }
+    )
+    return f"{api_base_url}/api/tax/v1/taxdocs/{tax_doc_id}/expected-tax-amount/calculation/bookkeeping?{params}"
+
+
+def send_bookkeeping_expected_tax_amount(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    tax_doc_id = _positive_int_from_payload(
+        payload,
+        "tax_doc_id",
+        "taxDocId",
+        field_name="tax_doc_id",
+    )
+    total_business_expense_amount = _positive_int_from_payload(
+        payload,
+        "total_business_expense_amount",
+        "totalBusinessExpenseAmount",
+        "총필요경비",
+        field_name="total_business_expense_amount",
+    )
+    submit_account_type = str(
+        payload.get("submit_account_type") or payload.get("submitAccountType") or "CUSTOMER"
+    ).strip().upper()
+    if not submit_account_type:
+        raise ValueError("submit_account_type is required")
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": (
+                f"단건 계산발송 dry-run taxDocId={tax_doc_id} "
+                f"submitAccountType={submit_account_type} 총필요경비={total_business_expense_amount}"
+            ),
+            "tax_doc_id": tax_doc_id,
+            "submit_account_type": submit_account_type,
+            "total_business_expense_amount": total_business_expense_amount,
+        }
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    calculation_web_path = str(
+        payload.get("calculation_web_path")
+        or os.getenv("INCOME33_BOOKKEEPING_CALCULATION_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/gross-income"
+    )
+    send_web_path = str(
+        payload.get("send_web_path")
+        or os.getenv("INCOME33_BOOKKEEPING_SEND_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/year-end-document"
+    )
+    calculation_headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": calculation_web_path,
+    }
+    send_headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": send_web_path,
+    }
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(calculation_web_path, wait_until="domcontentloaded")
+
+        base_calculation_url = _bookkeeping_calculation_url(
+            api_base_url=api_base_url,
+            tax_doc_id=tax_doc_id,
+            submit_account_type=submit_account_type,
+            additional_expense_amount=0,
+        )
+        base_response = _browser_fetch_json(page, url=base_calculation_url, headers=calculation_headers)
+        base_json = base_response.get("json") or {}
+        if not base_response.get("ok") or not base_json.get("ok"):
+            raise RuntimeError(f"bookkeeping base calculation failed status={base_response.get('status')}")
+        base_data = base_json.get("data") or {}
+        base_business_expense_amount = _required_int_field(
+            base_data,
+            "사업소득_필요_경비",
+            label="사업소득_필요_경비",
+        )
+        additional_expense_amount = total_business_expense_amount - base_business_expense_amount
+        if additional_expense_amount < 0:
+            raise ValueError(
+                "total_business_expense_amount must be greater than or equal to base business expense"
+            )
+
+        final_calculation_url = _bookkeeping_calculation_url(
+            api_base_url=api_base_url,
+            tax_doc_id=tax_doc_id,
+            submit_account_type=submit_account_type,
+            additional_expense_amount=additional_expense_amount,
+        )
+        final_response = _browser_fetch_json(page, url=final_calculation_url, headers=calculation_headers)
+        final_json = final_response.get("json") or {}
+        if not final_response.get("ok") or not final_json.get("ok"):
+            raise RuntimeError(f"bookkeeping final calculation failed status={final_response.get('status')}")
+        final_data = final_json.get("data") or {}
+        expected_tax_amount = _required_int_field(
+            final_data,
+            "종합소득세_납부_할_세액",
+            label="종합소득세_납부_할_세액",
+        )
+        expected_local_tax_amount = _required_int_field(
+            final_data,
+            "지방소득세_납부_할_세액",
+            label="지방소득세_납부_할_세액",
+        )
+        advised_fee_amount = _required_int_field(final_data, "권장수수료", label="권장수수료")
+        send_body = {
+            "calculationType": "BOOKKEEPING",
+            "submitAccountType": submit_account_type,
+            "추가_경비_인정액": additional_expense_amount,
+            "expectedTaxAmount": expected_tax_amount,
+            "expectedLocalTaxAmount": expected_local_tax_amount,
+            "submitFee": advised_fee_amount,
+            "advisedFeeAmount": advised_fee_amount,
+            "isCustomReview": False,
+            "isTimeDiscount": False,
+            "timeDiscountFee": None,
+        }
+        send_url = f"{api_base_url}/api/tax/v1/taxdocs/{tax_doc_id}/expected-tax-amount/send"
+        send_response = _browser_fetch_json(
+            page,
+            url=send_url,
+            method="POST",
+            headers=send_headers,
+            json_body=send_body,
+        )
+        send_json = send_response.get("json") or {}
+        result_data = send_json.get("data")
+        result_ok = result_data.get("result") is True if isinstance(result_data, dict) else result_data is True
+        if not send_response.get("ok") or not send_json.get("ok") or not result_ok:
+            raise RuntimeError(f"bookkeeping expected tax amount send failed status={send_response.get('status')}")
+        current_step = (
+            f"단건 계산발송 완료 taxDocId={tax_doc_id} 추가경비={additional_expense_amount} "
+            f"예상세액={expected_tax_amount} 지방세={expected_local_tax_amount} "
+            f"수수료={advised_fee_amount} status={send_response.get('status')}"
+        )
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": current_step,
+            "debug_port": debug_port,
+            "status_code": send_response.get("status"),
+            "tax_doc_id": tax_doc_id,
+            "submit_account_type": submit_account_type,
+            "base_business_expense_amount": base_business_expense_amount,
+            "total_business_expense_amount": total_business_expense_amount,
+            "additional_expense_amount": additional_expense_amount,
+            "expected_tax_amount": expected_tax_amount,
+            "expected_local_tax_amount": expected_local_tax_amount,
+            "submit_fee": advised_fee_amount,
+            "advised_fee_amount": advised_fee_amount,
+            "send_body": send_body,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "send_bookkeeping_expected_tax_amount_done bot_id=%s tax_doc_id=%s additional_expense=%s status_code=%s",
+        bot_id,
+        result.get("tax_doc_id"),
+        result.get("additional_expense_amount"),
+        result.get("status_code"),
+    )
+    return result
+
+
+def send_rate_based_bookkeeping_expected_tax_amount(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    tax_doc_id = _positive_int_from_payload(
+        payload,
+        "tax_doc_id",
+        "taxDocId",
+        field_name="tax_doc_id",
+    )
+    submit_account_type = str(
+        payload.get("submit_account_type") or payload.get("submitAccountType") or "CUSTOMER"
+    ).strip().upper()
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"경비율 장부 계산발송 dry-run taxDocId={tax_doc_id}",
+            "tax_doc_id": tax_doc_id,
+        }
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    gross_income_web_path = str(
+        payload.get("gross_income_web_path")
+        or os.getenv("INCOME33_GROSS_INCOME_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/gross-income"
+    )
+    year_end_web_path = str(
+        payload.get("year_end_web_path")
+        or os.getenv("INCOME33_YEAR_END_DOCUMENT_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/year-end-document"
+    )
+    expenses_web_path = str(
+        payload.get("expenses_web_path")
+        or os.getenv("INCOME33_EXPENSES_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/expenses"
+    )
+    summary_web_path = str(
+        payload.get("summary_web_path")
+        or os.getenv("INCOME33_SUMMARY_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/summary"
+    )
+
+    def _headers(web_path: str) -> dict[str, str]:
+        return {
+            "accept": "application/json, text/plain, */*",
+            "x-host": "GIT",
+            "x-web-path": web_path,
+        }
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(gross_income_web_path, wait_until="domcontentloaded")
+
+        business_income_data = _fetch_required_json_data(
+            page,
+            url=f"{api_base_url}/api/tax/v1/gitax/gross-incomes-prepaid-tax/{tax_doc_id}/business-incomes",
+            headers=_headers(gross_income_web_path),
+            label="business incomes lookup",
+        )
+        year_end_document_data = _fetch_required_json_data(
+            page,
+            url=f"{api_base_url}/api/tax/v1/gitax/year-end-document/{tax_doc_id}",
+            headers=_headers(year_end_web_path),
+            label="year-end document lookup",
+        )
+        expenses_summary_data = _fetch_required_json_data(
+            page,
+            url=f"{api_base_url}/api/tax/v1/gitax/expenses/{tax_doc_id}/expenses-summary",
+            headers=_headers(expenses_web_path),
+            label="expenses summary lookup",
+        )
+        calculation = _calculate_rate_based_total_business_expense(
+            business_income_data=business_income_data,
+            year_end_document_data=year_end_document_data,
+            expenses_summary_data=expenses_summary_data,
+        )
+        calculation.update(
+            {
+                "ok": True,
+                "dry_run": False,
+                "status": "session_active",
+                "debug_port": debug_port,
+                "tax_doc_id": tax_doc_id,
+                "submit_account_type": submit_account_type,
+            }
+        )
+        if calculation.get("skipped"):
+            custom_response = _put_custom_type_da_for_taxdoc(
+                page=page,
+                api_base_url=api_base_url,
+                tax_doc_id=tax_doc_id,
+                headers=_headers(summary_web_path),
+            )
+            calculation["custom_type"] = "다"
+            calculation["custom_type_status_code"] = custom_response.get("status")
+            calculation["current_step"] = (
+                f"경비율 계산 패스 taxDocId={tax_doc_id} "
+                f"customType=다 status={custom_response.get('status')}"
+            )
+            _write_bookkeeping_expense_rate_skip_log(calculation)
+            logger.warning(
+                "bookkeeping_expense_rate_skipped tax_doc_id=%s reason=%s custom_type_status=%s",
+                tax_doc_id,
+                calculation.get("reason"),
+                custom_response.get("status"),
+            )
+        else:
+            calculation["current_step"] = (
+                f"경비율 총필요경비 산출 taxDocId={tax_doc_id} "
+                f"총필요경비={calculation.get('total_business_expense_amount')}"
+            )
+        return calculation
+
+    rate_result = _run_in_cdp_session(bot_id, payload, _run)
+    if rate_result.get("skipped"):
+        return rate_result
+
+    send_payload = dict(payload)
+    send_payload["tax_doc_id"] = tax_doc_id
+    send_payload["submit_account_type"] = submit_account_type
+    send_payload["total_business_expense_amount"] = int(rate_result["total_business_expense_amount"])
+    send_result = send_bookkeeping_expected_tax_amount(
+        bot_id=bot_id,
+        payload=send_payload,
+        logger=logger,
+    )
+    send_result["rate_based_total_business_expense"] = rate_result
+    return send_result
+
+
+def preview_rate_based_bookkeeping_expected_tax_amounts(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Collect TA list taxDocIds for bulk rate-based bookkeeping send.
+
+    This intentionally reuses the existing NewTA TA-list preview/office lookup
+    flow, but gives operators a distinct current_step so it is not confused
+    with the older bulk expected-tax send button.
+    """
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
+    tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+    result = dict(preview)
+    result["tax_doc_ids"] = tax_doc_ids
+    result["count"] = len(tax_doc_ids)
+    result["current_step"] = f"일괄세션 확인 {len(tax_doc_ids)}건"
+    return result
+
+
+def send_rate_based_bookkeeping_expected_tax_amounts(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Bulk-send rate-based bookkeeping expected tax for collected taxDocs.
+
+    A failure for one taxDoc is recorded and the rest continue.  A skipped
+    single-taxdoc result, such as customType=다, is counted separately from a
+    successful send.
+    """
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    requested_tax_doc_ids = _tax_doc_ids_from_payload(payload)
+    preview: dict[str, Any] | None = None
+    if requested_tax_doc_ids:
+        tax_doc_ids = requested_tax_doc_ids
+    else:
+        preview = preview_rate_based_bookkeeping_expected_tax_amounts(
+            bot_id=bot_id,
+            payload=payload,
+            logger=logger,
+        )
+        tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
+
+    if not tax_doc_ids:
+        return {
+            "ok": True,
+            "dry_run": bool(is_browser_control_dry_run(payload)),
+            "status": "session_active",
+            "current_step": "일괄 경비율 장부발송 대상 없음",
+            "sent_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "tax_doc_ids": [],
+            "results": [],
+            "failures": [],
+        }
+
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    sent_count = 0
+    skipped_count = 0
+    for tax_doc_id in tax_doc_ids:
+        send_payload = dict(payload)
+        send_payload["tax_doc_id"] = int(tax_doc_id)
+        try:
+            item_result = send_rate_based_bookkeeping_expected_tax_amount(
+                bot_id=bot_id,
+                payload=send_payload,
+                logger=logger,
+            )
+        except Exception as exc:  # Continue so one bad taxDoc does not stop the batch.
+            failure = {"tax_doc_id": int(tax_doc_id), "error": str(exc)}
+            failures.append(failure)
+            logger.exception(
+                "bulk_rate_based_bookkeeping_send_failed bot_id=%s tax_doc_id=%s",
+                bot_id,
+                tax_doc_id,
+            )
+            continue
+
+        results.append(item_result)
+        if item_result.get("skipped"):
+            skipped_count += 1
+        else:
+            sent_count += 1
+
+    failed_count = len(failures)
+    current_step = (
+        f"일괄 경비율 장부발송 완료 발송={sent_count}건 "
+        f"패스={skipped_count}건 실패={failed_count}건"
+    )
+    return {
+        "ok": failed_count == 0,
+        "dry_run": bool(is_browser_control_dry_run(payload)),
+        "status": "session_active" if failed_count == 0 else "manual_required",
+        "current_step": current_step,
+        "sent_count": sent_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "tax_doc_ids": tax_doc_ids,
+        "results": results,
+        "failures": failures,
+        "preview": preview,
+    }
+
+
 def assign_taxdocs_to_current_accountant(
     *,
     bot_id: str,
@@ -948,13 +1672,15 @@ def refresh_page(
     logger = logger or logging.getLogger("income33.agent.browser_control")
     payload = payload or {}
     refresh_url = resolve_refresh_url(payload)
+    force = bool(payload.get("force") or payload.get("force_refresh"))
 
     if is_browser_control_dry_run(payload):
         logger.info(
-            "refresh_page_dry_run bot_id=%s debug_port=%s url=%s",
+            "refresh_page_dry_run bot_id=%s debug_port=%s url=%s force=%s",
             bot_id,
             resolve_browser_debug_port(bot_id, payload),
             refresh_url,
+            force,
         )
         return {
             "ok": True,
@@ -962,10 +1688,13 @@ def refresh_page(
             "status": "session_active",
             "current_step": "session_refresh_dry_run",
             "url": refresh_url,
+            "force": force,
         }
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
         page.goto(refresh_url, wait_until="domcontentloaded")
+        if force and hasattr(page, "reload"):
+            page.reload(wait_until="domcontentloaded")
         return {
             "ok": True,
             "dry_run": False,
@@ -973,14 +1702,16 @@ def refresh_page(
             "current_step": "session_refresh",
             "debug_port": debug_port,
             "url": page.url,
+            "force": force,
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
     logger.info(
-        "refresh_page_done bot_id=%s debug_port=%s url=%s",
+        "refresh_page_done bot_id=%s debug_port=%s url=%s force=%s",
         bot_id,
         result.get("debug_port"),
         result.get("url"),
+        result.get("force"),
     )
     return result
 

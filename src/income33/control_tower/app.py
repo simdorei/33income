@@ -29,6 +29,8 @@ DASHBOARD_ALLOWED_COMMANDS = {
     "refresh_page",
     "preview_send_targets",
     "send_expected_tax_amounts",
+    "preview_rate_based_bookkeeping_expected_tax_amounts",
+    "send_rate_based_bookkeeping_expected_tax_amounts",
 }
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
@@ -87,6 +89,19 @@ def _submit_auth_code_form(bot_id: str) -> str:
     )
 
 
+def _rate_based_bookkeeping_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/rate-based-bookkeeping-send' "
+        "class='inline-form' style='display:inline'>"
+        "<input type='number' name='tax_doc_id' placeholder='taxDocId' min='1' required />"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('taxDocId 기준 경비율 장부 계산발송을 진행할까요?')\">"
+        "경비율 장부발송</button>"
+        "</form>"
+    )
+
+
 def _bot_actions_html(bot_id: str) -> str:
     buttons = [
         _command_button(bot_id, "start", "시작"),
@@ -105,6 +120,24 @@ def _bot_actions_html(bot_id: str) -> str:
                 "계산발송",
                 "send",
                 "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?",
+            )
+        )
+        buttons.append(_rate_based_bookkeeping_form(bot_id))
+        buttons.append(
+            _command_button(
+                bot_id,
+                "preview_rate_based_bookkeeping_expected_tax_amounts",
+                "일괄세션 확인",
+                "refresh",
+            )
+        )
+        buttons.append(
+            _command_button(
+                bot_id,
+                "send_rate_based_bookkeeping_expected_tax_amounts",
+                "일괄 계산발송 시작",
+                "send",
+                "TA 목록을 조회한 뒤 각 taxDocId별 경비율 장부 계산발송을 진행합니다. 진행할까요?",
             )
         )
     buttons.extend(
@@ -333,6 +366,32 @@ def create_app(
         except KeyError as exc:
             logger.warning("queue_auth_code_not_found bot_id=%s", bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/bots/{bot_id}/rate-based-bookkeeping-send")
+    async def queue_rate_based_bookkeeping_send(bot_id: str, request: Request) -> RedirectResponse:
+        from urllib.parse import parse_qs
+
+        raw_body = (await request.body()).decode("utf-8", errors="ignore")
+        raw_tax_doc_id = parse_qs(raw_body).get("tax_doc_id", [""])[0].strip()
+        try:
+            tax_doc_id = int(raw_tax_doc_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="tax_doc_id must be a positive integer") from exc
+        if tax_doc_id <= 0:
+            raise HTTPException(status_code=400, detail="tax_doc_id must be a positive integer")
+        try:
+            app.state.service.queue_bot_command(
+                bot_id=bot_id,
+                command="send_rate_based_bookkeeping_expected_tax_amount",
+                payload={"tax_doc_id": tax_doc_id},
+            )
+        except KeyError as exc:
+            logger.warning("queue_rate_based_bookkeeping_not_found bot_id=%s", bot_id)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            logger.warning("queue_rate_based_bookkeeping_rejected bot_id=%s reason=%s", bot_id, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/agents/{pc_id}/commands/poll")

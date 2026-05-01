@@ -45,24 +45,104 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "새로고침" in root.text
     assert "목록조회 테스트" in root.text
     assert "계산발송" in root.text
+    assert "일괄세션 확인" in root.text
+    assert "일괄 계산발송 시작" in root.text
     assert "content='5'" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" in root.text
     assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" in root.text
     assert "return confirm" in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
+    assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
 
 
-def test_api_rejects_send_expected_tax_amounts_for_reporter_bot(tmp_path):
+def test_api_rejects_expected_tax_amount_commands_for_reporter_bot(tmp_path):
+    client = build_client(tmp_path)
+
+    for command in (
+        "send_expected_tax_amounts",
+        "send_bookkeeping_expected_tax_amount",
+        "send_rate_based_bookkeeping_expected_tax_amount",
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        "send_rate_based_bookkeeping_expected_tax_amounts",
+    ):
+        queued = client.post(
+            "/api/bots/reporter-01/commands",
+            json={"command": command, "payload": {}},
+        )
+        assert queued.status_code == 400
+        assert "only allowed for sender" in queued.text
+
+
+def test_api_can_queue_send_bookkeeping_expected_tax_amount_command(tmp_path):
     client = build_client(tmp_path)
 
     queued = client.post(
-        "/api/bots/reporter-01/commands",
-        json={"command": "send_expected_tax_amounts", "payload": {}},
+        "/api/bots/sender-01/commands",
+        json={
+            "command": "send_bookkeeping_expected_tax_amount",
+            "payload": {
+                "tax_doc_id": 1345836,
+                "submit_account_type": "CUSTOMER",
+                "total_business_expense_amount": 41538144,
+            },
+        },
     )
-    assert queued.status_code == 400
-    assert "only allowed for sender" in queued.text
+    assert queued.status_code == 200
+    assert queued.json()["status"] == "pending"
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_bookkeeping_expected_tax_amount"
+    assert '"tax_doc_id": 1345836' in commands[0]["payload_json"]
+    assert '"total_business_expense_amount": 41538144' in commands[0]["payload_json"]
+
+
+def test_api_can_queue_send_rate_based_bookkeeping_expected_tax_amount_command(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={
+            "command": "send_rate_based_bookkeeping_expected_tax_amount",
+            "payload": {"tax_doc_id": 1348568},
+        },
+    )
+    assert queued.status_code == 200
+    assert queued.json()["status"] == "pending"
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amount"
+    assert '"tax_doc_id": 1348568' in commands[0]["payload_json"]
+
+
+def test_api_can_queue_bulk_rate_based_bookkeeping_commands(tmp_path):
+    for command in (
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        "send_rate_based_bookkeeping_expected_tax_amounts",
+    ):
+        client = build_client(tmp_path)
+        queued = client.post(
+            "/api/bots/sender-01/commands",
+            json={"command": command, "payload": {"year": 2025, "size": 20}},
+        )
+        assert queued.status_code == 200
+        assert queued.json()["status"] == "pending"
+
+        polled = client.get("/api/agents/pc-01/commands/poll")
+        assert polled.status_code == 200
+        commands = polled.json()["commands"]
+        assert len(commands) == 1
+        assert commands[0]["command"] == command
+        assert '"year": 2025' in commands[0]["payload_json"]
 
 
 def test_api_can_queue_send_expected_tax_amounts_command(tmp_path):
@@ -139,6 +219,24 @@ def test_dashboard_can_queue_login_command(tmp_path):
     commands = polled.json()["commands"]
     assert len(commands) == 1
     assert commands[0]["command"] == "open_login"
+
+
+def test_dashboard_can_queue_rate_based_bookkeeping_command(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/rate-based-bookkeeping-send",
+        data={"tax_doc_id": "1348568"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amount"
+    assert '"tax_doc_id": 1348568' in commands[0]["payload_json"]
 
 
 def test_dashboard_can_queue_auth_code_command(tmp_path):
