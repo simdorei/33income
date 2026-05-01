@@ -197,6 +197,40 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        assert client.heartbeats[-1]["bot_status"] == "session_active"
+        assert client.heartbeats[-1]["current_step"] == "계산발송 중"
+        return {"status": "session_active", "current_step": "계산발송 완료"}
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [{"id": 19, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
+    )
+
+    runner.run_once()
+
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료"
+
+
+def test_runner_reports_failure_step_when_send_command_fails(monkeypatch):
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        raise RuntimeError("send api failed")
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [{"id": 20, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
+    )
+
+    runner.run_once()
+
+    assert client.completed == [
+        {"command_id": 20, "status": "failed", "error_message": "send api failed"}
+    ]
+    assert client.heartbeats[-1]["bot_status"] == "manual_required"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 실패: send api failed"
+
+
 def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monkeypatch):
     monotonic_points = iter([1000.0])
     calls = []
@@ -235,6 +269,8 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
 
     def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
         calls.append({"bot_id": bot_id, "payload": payload})
+        if len(calls) == 2:
+            assert client.heartbeats[-1]["current_step"] == "계산발송 반복 중"
         return {
             "status": "session_active",
             "current_step": f"계산발송 완료 #{len(calls)}",

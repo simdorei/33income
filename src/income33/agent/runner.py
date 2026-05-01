@@ -227,6 +227,7 @@ class AgentRunner:
         interval = _resolve_send_repeat_interval_seconds()
         try:
             self._set_bot_state("session_active", "계산발송 반복 중")
+            self._send_current_state_heartbeat()
             result = send_expected_tax_amounts(
                 bot_id=self.agent.bot_id,
                 payload=payload,
@@ -319,6 +320,7 @@ class AgentRunner:
                 )
             elif command_name == "preview_send_targets":
                 self._set_bot_state("session_active", "목록조회 테스트 중")
+                self._send_current_state_heartbeat()
                 result = preview_expected_tax_send_targets(
                     bot_id=self.agent.bot_id,
                     payload=payload,
@@ -331,6 +333,7 @@ class AgentRunner:
             elif command_name == "send_expected_tax_amounts":
                 self._cancel_repeated_send()
                 self._set_bot_state("session_active", "계산발송 중")
+                self._send_current_state_heartbeat()
                 result = send_expected_tax_amounts(
                     bot_id=self.agent.bot_id,
                     payload=payload,
@@ -349,11 +352,15 @@ class AgentRunner:
                 raise ValueError(f"unsupported command: {command_name}")
             # status command is heartbeat-only
         except Exception as exc:
+            if command_name == "send_expected_tax_amounts":
+                self._cancel_repeated_send()
+                self._set_bot_state("manual_required", f"계산발송 실패: {exc}")
             self.client.complete_command(
                 command_id=command_id,
                 status="failed",
                 error_message=str(exc),
             )
+            self._send_current_state_heartbeat()
             self.logger.exception(
                 "command_failed command_id=%s command=%s bot_id=%s",
                 command_id,
