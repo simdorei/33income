@@ -4,10 +4,12 @@ from income33.config import AppConfig, ControlTowerConfig
 from income33.control_tower.app import create_app
 from income33.control_tower.service import (
     ControlTowerService,
+    command_policies,
     dashboard_allowed_commands,
     get_command_policy,
 )
 from income33.db import Database
+from income33.models import COMMAND_TYPES
 
 
 def build_client(tmp_path):
@@ -29,6 +31,14 @@ def test_command_policy_centralizes_dashboard_allowlist_and_sender_only_guardrai
 
     assert get_command_policy("send_expected_tax_amounts").sender_only is True
     assert get_command_policy("open_login").sender_only is False
+
+
+def test_command_metadata_and_policy_maps_are_aligned():
+    policies = command_policies()
+    assert set(COMMAND_TYPES) == set(policies)
+
+    allowed = dashboard_allowed_commands()
+    assert allowed == {command for command, policy in policies.items() if policy.dashboard_allowed}
 
 
 def test_default_retry_hint_applies_when_not_provided(tmp_path):

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from income33.db import Database
+from income33.models import COMMAND_TYPES
 
 logger = logging.getLogger("income33.control_tower.service")
 
@@ -48,6 +49,15 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         default_retry={"interval_sec": 60, "max_attempts": 2},
     ),
 }
+
+if missing_policy_commands := set(COMMAND_TYPES) - set(_COMMAND_POLICIES):
+    raise RuntimeError(
+        f"missing command policy definitions: {sorted(missing_policy_commands)}"
+    )
+
+
+def command_policies() -> dict[str, CommandPolicy]:
+    return dict(_COMMAND_POLICIES)
 
 
 def get_command_policy(command: str) -> CommandPolicy:

@@ -19,7 +19,7 @@ setup_component_logger("income33.control_tower", "control_tower.log")
 logger = logging.getLogger("income33.control_tower.app")
 
 
-DASHBOARD_ALLOWED_COMMANDS = dashboard_allowed_commands()
+DASHBOARD_ALLOWED_COMMANDS = frozenset(dashboard_allowed_commands())
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
     ("발송 봇 01-09", "sender", 1, 9, 0),

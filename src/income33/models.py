@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Final, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,7 @@ BotStatus = Literal[
     "restarting",
     "stopped",
 ]
-CommandType = Literal[
+COMMAND_TYPES: Final[tuple[str, ...]] = (
     "start",
     "stop",
     "restart",
@@ -39,7 +39,9 @@ CommandType = Literal[
     "send_rate_based_bookkeeping_expected_tax_amount",
     "preview_rate_based_bookkeeping_expected_tax_amounts",
     "send_rate_based_bookkeeping_expected_tax_amounts",
-]
+)
+
+CommandType = Literal[*COMMAND_TYPES]
 CommandStatus = Literal["pending", "running", "done", "failed"]
 
 
