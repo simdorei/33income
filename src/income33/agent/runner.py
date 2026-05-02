@@ -100,6 +100,13 @@ class AgentRunner:
         self._repeat_send_payload: dict[str, Any] | None = None
         self._next_repeated_send_monotonic: float | None = None
         self._repeat_send_attempt_counts: dict[int, int] = {}
+        self._failure_step_messages: dict[str, str] = {
+            "send_expected_tax_amounts": "계산발송 실패",
+            "send_bookkeeping_expected_tax_amount": "단건 계산발송 실패",
+            "send_rate_based_bookkeeping_expected_tax_amount": "경비율 장부 계산발송 실패",
+            "preview_rate_based_bookkeeping_expected_tax_amounts": "일괄세션 확인 실패",
+            "send_rate_based_bookkeeping_expected_tax_amounts": "일괄 경비율 장부발송 실패",
+        }
 
     @staticmethod
     def _command_payload_json(command: dict[str, Any]) -> dict[str, Any]:
@@ -389,6 +396,199 @@ class AgentRunner:
             interval,
         )
 
+    def _handle_start(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self.bot.start()
+        self._set_bot_state(self.bot.status)
+
+    def _handle_stop(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self.bot.stop()
+        self._set_bot_state(self.bot.status)
+
+    def _handle_restart(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self.bot.restart()
+        self._set_bot_state(self.bot.status)
+
+    def _handle_open_login(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("login_required")
+        open_login_window(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.login"),
+        )
+        self._set_bot_state("login_opened", "login_opened")
+
+    def _handle_fill_login(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("login_filling")
+        result = fill_login(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "login_auth_required"),
+            str(result.get("current_step") or "login_auth_required"),
+        )
+
+    def _handle_submit_auth_code(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        auth_code = str(payload.get("auth_code") or "")
+        self._set_bot_state("manual_required")
+        result = submit_auth_code(
+            bot_id=self.agent.bot_id,
+            auth_code=auth_code,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "session_active"),
+        )
+
+    def _handle_refresh_page(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("refreshing", "session_refresh")
+        result = refresh_page(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "session_refresh"),
+        )
+
+    def _handle_preview_send_targets(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("session_active", "목록조회 테스트 중")
+        self._send_current_state_heartbeat()
+        result = preview_expected_tax_send_targets(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "목록조회 테스트 완료"),
+        )
+
+    def _handle_send_expected_tax_amounts(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "계산발송 중")
+        self._send_current_state_heartbeat()
+        result = send_expected_tax_amounts(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        result_status = str(result.get("status") or "session_active")
+        result_step = str(result.get("current_step") or "계산발송 완료")
+        if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
+            self._schedule_repeated_send(payload, retry_policy)
+            repeat_max_attempts = int(self._repeat_send_payload.get("_repeat_max_attempts") or 3)
+            self._track_repeat_send_attempts(
+                self._repeat_send_attempt_counts,
+                list(result.get("tax_doc_ids") or []),
+                max_attempts=repeat_max_attempts,
+            )
+            repeat_interval = int(self._repeat_send_payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
+            result_step = self._repeat_send_wait_step(
+                result_step,
+                remaining_seconds=repeat_interval,
+            )
+        self._set_bot_state(result_status, result_step)
+
+    def _handle_send_bookkeeping_expected_tax_amount(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "단건 계산발송 중")
+        self._send_current_state_heartbeat()
+        result = send_bookkeeping_expected_tax_amount(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "단건 계산발송 완료"),
+        )
+
+    def _handle_send_rate_based_bookkeeping_expected_tax_amount(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "경비율 장부 계산발송 중")
+        self._send_current_state_heartbeat()
+        result = send_rate_based_bookkeeping_expected_tax_amount(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "경비율 장부 계산발송 완료"),
+        )
+
+    def _handle_preview_rate_based_bookkeeping_expected_tax_amounts(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "일괄세션 확인 중")
+        self._send_current_state_heartbeat()
+        result = preview_rate_based_bookkeeping_expected_tax_amounts(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "일괄세션 확인 완료"),
+        )
+
+    def _handle_send_rate_based_bookkeeping_expected_tax_amounts(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "일괄 경비율 장부발송 중")
+        self._send_current_state_heartbeat()
+        result = send_rate_based_bookkeeping_expected_tax_amounts(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "일괄 경비율 장부발송 완료"),
+        )
+
+    def _handle_login_done(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("idle", "idle")
+        self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
+
+    def _handle_status(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        return
+
+    def _command_handlers(self) -> dict[str, Callable[[dict[str, Any], dict[str, Any]], None]]:
+        return {
+            "start": self._handle_start,
+            "stop": self._handle_stop,
+            "restart": self._handle_restart,
+            "open_login": self._handle_open_login,
+            "fill_login": self._handle_fill_login,
+            "submit_auth_code": self._handle_submit_auth_code,
+            "refresh_page": self._handle_refresh_page,
+            "preview_send_targets": self._handle_preview_send_targets,
+            "send_expected_tax_amounts": self._handle_send_expected_tax_amounts,
+            "send_bookkeeping_expected_tax_amount": self._handle_send_bookkeeping_expected_tax_amount,
+            "send_rate_based_bookkeeping_expected_tax_amount": self._handle_send_rate_based_bookkeeping_expected_tax_amount,
+            "preview_rate_based_bookkeeping_expected_tax_amounts": self._handle_preview_rate_based_bookkeeping_expected_tax_amounts,
+            "send_rate_based_bookkeeping_expected_tax_amounts": self._handle_send_rate_based_bookkeeping_expected_tax_amounts,
+            "login_done": self._handle_login_done,
+            "status": self._handle_status,
+        }
+
+    def _dispatch_command(self, command_name: str, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        handler = self._command_handlers().get(command_name)
+        if handler is None:
+            raise ValueError(f"unsupported command: {command_name}")
+        handler(payload, retry_policy)
+
+    def _apply_failure_state_for_command(self, command_name: str, exc: Exception) -> None:
+        if command_name == "send_expected_tax_amounts":
+            self._cancel_repeated_send()
+        failure_prefix = self._failure_step_messages.get(command_name)
+        if failure_prefix:
+            self._set_bot_state("manual_required", f"{failure_prefix}: {exc}")
+
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
         command_id = command["id"]
@@ -406,165 +606,9 @@ class AgentRunner:
         try:
             if self.agent.bot_type != "sender" and command_name in _SENDER_ONLY_COMMANDS:
                 raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
-            if command_name == "start":
-                self.bot.start()
-                self._set_bot_state(self.bot.status)
-            elif command_name == "stop":
-                self.bot.stop()
-                self._set_bot_state(self.bot.status)
-            elif command_name == "restart":
-                self.bot.restart()
-                self._set_bot_state(self.bot.status)
-            elif command_name == "open_login":
-                self._set_bot_state("login_required")
-                open_login_window(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.login"),
-                )
-                self._set_bot_state("login_opened", "login_opened")
-            elif command_name == "fill_login":
-                self._set_bot_state("login_filling")
-                result = fill_login(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "login_auth_required"),
-                    str(result.get("current_step") or "login_auth_required"),
-                )
-            elif command_name == "submit_auth_code":
-                auth_code = str(payload.get("auth_code") or "")
-                self._set_bot_state("manual_required")
-                result = submit_auth_code(
-                    bot_id=self.agent.bot_id,
-                    auth_code=auth_code,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "session_active"),
-                )
-            elif command_name == "refresh_page":
-                self._set_bot_state("refreshing", "session_refresh")
-                result = refresh_page(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "session_refresh"),
-                )
-            elif command_name == "preview_send_targets":
-                self._set_bot_state("session_active", "목록조회 테스트 중")
-                self._send_current_state_heartbeat()
-                result = preview_expected_tax_send_targets(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "목록조회 테스트 완료"),
-                )
-            elif command_name == "send_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "계산발송 중")
-                self._send_current_state_heartbeat()
-                result = send_expected_tax_amounts(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                result_status = str(result.get("status") or "session_active")
-                result_step = str(result.get("current_step") or "계산발송 완료")
-                if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
-                    self._schedule_repeated_send(payload, retry_policy)
-                    repeat_max_attempts = int(self._repeat_send_payload.get("_repeat_max_attempts") or 3)
-                    self._track_repeat_send_attempts(
-                        self._repeat_send_attempt_counts,
-                        list(result.get("tax_doc_ids") or []),
-                        max_attempts=repeat_max_attempts,
-                    )
-                    repeat_interval = int(self._repeat_send_payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
-                    result_step = self._repeat_send_wait_step(
-                        result_step,
-                        remaining_seconds=repeat_interval,
-                    )
-                self._set_bot_state(result_status, result_step)
-            elif command_name == "send_bookkeeping_expected_tax_amount":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "단건 계산발송 중")
-                self._send_current_state_heartbeat()
-                result = send_bookkeeping_expected_tax_amount(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "단건 계산발송 완료"),
-                )
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amount":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "경비율 장부 계산발송 중")
-                self._send_current_state_heartbeat()
-                result = send_rate_based_bookkeeping_expected_tax_amount(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "경비율 장부 계산발송 완료"),
-                )
-            elif command_name == "preview_rate_based_bookkeeping_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "일괄세션 확인 중")
-                self._send_current_state_heartbeat()
-                result = preview_rate_based_bookkeeping_expected_tax_amounts(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "일괄세션 확인 완료"),
-                )
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "일괄 경비율 장부발송 중")
-                self._send_current_state_heartbeat()
-                result = send_rate_based_bookkeeping_expected_tax_amounts(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "일괄 경비율 장부발송 완료"),
-                )
-            elif command_name == "login_done":
-                self._set_bot_state("idle", "idle")
-                self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
-            elif command_name != "status":
-                raise ValueError(f"unsupported command: {command_name}")
-            # status command is heartbeat-only
+            self._dispatch_command(command_name, payload, retry_policy)
         except Exception as exc:
-            if command_name == "send_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("manual_required", f"계산발송 실패: {exc}")
-            elif command_name == "send_bookkeeping_expected_tax_amount":
-                self._set_bot_state("manual_required", f"단건 계산발송 실패: {exc}")
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amount":
-                self._set_bot_state("manual_required", f"경비율 장부 계산발송 실패: {exc}")
-            elif command_name == "preview_rate_based_bookkeeping_expected_tax_amounts":
-                self._set_bot_state("manual_required", f"일괄세션 확인 실패: {exc}")
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amounts":
-                self._set_bot_state("manual_required", f"일괄 경비율 장부발송 실패: {exc}")
+            self._apply_failure_state_for_command(command_name, exc)
             self.client.complete_command(
                 command_id=command_id,
                 status="failed",
