@@ -2,6 +2,10 @@ import json
 
 from income33.agent.runner import AgentRunner
 from income33.config import AgentConfig
+from income33.control_tower.service import (
+    sender_only_commands,
+    should_cancel_repeated_send_before_command,
+)
 
 
 class FakeClient:
@@ -222,6 +226,23 @@ def test_runner_rejects_sender_only_command_on_reporter(monkeypatch):
     assert client.completed == [{"command_id": 99, "status": "failed", "error_message": "SENDER_ONLY_COMMAND: send_expected_tax_amounts"}]
     assert client.heartbeats[-1]["bot_status"] == "manual_required"
     assert "SENDER_ONLY_COMMAND" in client.heartbeats[-1]["current_step"]
+
+
+def test_runner_sender_only_guard_uses_control_tower_policy_set():
+    expected = {
+        "send_expected_tax_amounts",
+        "send_bookkeeping_expected_tax_amount",
+        "send_rate_based_bookkeeping_expected_tax_amount",
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        "send_rate_based_bookkeeping_expected_tax_amounts",
+    }
+    assert sender_only_commands() == expected
+
+
+def test_runner_repeat_cancel_guard_uses_control_tower_policy_set():
+    assert should_cancel_repeated_send_before_command("status") is False
+    assert should_cancel_repeated_send_before_command("send_expected_tax_amounts") is False
+    assert should_cancel_repeated_send_before_command("stop") is True
 
 
 def test_runner_handles_send_bookkeeping_expected_tax_amount_command(monkeypatch):

@@ -4,9 +4,15 @@ from income33.config import AppConfig, ControlTowerConfig
 from income33.control_tower.app import create_app
 from income33.control_tower.service import (
     ControlTowerService,
+    command_retry_policy,
     command_policies,
     dashboard_allowed_commands,
     get_command_policy,
+    resolve_retry_interval_seconds,
+    resolve_retry_max_attempts,
+    sender_only_commands,
+    should_cancel_repeated_send_before_command,
+    should_schedule_repeated_send,
 )
 from income33.db import Database
 from income33.models import COMMAND_TYPES
@@ -39,6 +45,52 @@ def test_command_metadata_and_policy_maps_are_aligned():
 
     allowed = dashboard_allowed_commands()
     assert allowed == {command for command, policy in policies.items() if policy.dashboard_allowed}
+    assert sender_only_commands() == {
+        command for command, policy in policies.items() if policy.sender_only
+    }
+
+
+def test_repeat_orchestration_policy_helpers_are_centralized():
+    assert should_cancel_repeated_send_before_command("status") is False
+    assert should_cancel_repeated_send_before_command("send_expected_tax_amounts") is False
+    assert should_cancel_repeated_send_before_command("stop") is True
+
+    assert should_schedule_repeated_send("send_expected_tax_amounts", {"year": 2025}) is True
+    assert should_schedule_repeated_send("send_expected_tax_amounts", {"tax_doc_ids": [1]}) is False
+    assert should_schedule_repeated_send(
+        "send_expected_tax_amounts",
+        {"tax_doc_ids": [1], "repeat": True},
+    ) is True
+    assert should_schedule_repeated_send("status", {"repeat": True}) is False
+
+
+def test_retry_policy_resolution_uses_command_policy_defaults_and_legacy_env(monkeypatch):
+    assert command_retry_policy({"_retry": {"interval_sec": 120, "max_attempts": 4}}) == {
+        "interval_sec": 120,
+        "max_attempts": 4,
+    }
+    assert command_retry_policy({"retry": {"interval_sec": 90}}) == {"interval_sec": 90}
+    assert command_retry_policy({"interval_sec": 15, "max_attempts": 2}) == {
+        "interval_sec": 15,
+        "max_attempts": 2,
+    }
+
+    monkeypatch.delenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", raising=False)
+    assert resolve_retry_interval_seconds("send_expected_tax_amounts", {}) == 300
+    assert resolve_retry_max_attempts("send_expected_tax_amounts", {}) == 3
+    assert resolve_retry_interval_seconds(
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        {},
+    ) == 60
+    assert resolve_retry_max_attempts(
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        {},
+    ) == 2
+
+    monkeypatch.setenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", "420")
+    assert resolve_retry_interval_seconds("send_expected_tax_amounts", {}) == 420
+    monkeypatch.setenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", "0")
+    assert resolve_retry_interval_seconds("send_expected_tax_amounts", {}) == 300
 
 
 def test_default_retry_hint_applies_when_not_provided(tmp_path):

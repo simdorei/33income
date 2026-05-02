@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from income33.db import Database
 from income33.models import COMMAND_TYPES
@@ -15,6 +16,8 @@ class CommandPolicy:
     sender_only: bool = False
     dashboard_allowed: bool = False
     default_retry: dict[str, Any] | None = None
+    preserves_repeat_schedule: bool = False
+    repeat_schedule_enabled: bool = False
 
 
 _DEFAULT_POLICY = CommandPolicy()
@@ -24,7 +27,7 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
     "start": CommandPolicy(dashboard_allowed=True),
     "stop": CommandPolicy(dashboard_allowed=True),
     "restart": CommandPolicy(dashboard_allowed=True),
-    "status": CommandPolicy(dashboard_allowed=True),
+    "status": CommandPolicy(dashboard_allowed=True, preserves_repeat_schedule=True),
     "open_login": CommandPolicy(dashboard_allowed=True),
     "login_done": CommandPolicy(dashboard_allowed=True),
     "fill_login": CommandPolicy(dashboard_allowed=True),
@@ -35,6 +38,8 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         sender_only=True,
         dashboard_allowed=True,
         default_retry={"interval_sec": 300, "max_attempts": 3},
+        preserves_repeat_schedule=True,
+        repeat_schedule_enabled=True,
     ),
     "send_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
     "send_rate_based_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
@@ -54,6 +59,10 @@ if missing_policy_commands := set(COMMAND_TYPES) - set(_COMMAND_POLICIES):
     raise RuntimeError(
         f"missing command policy definitions: {sorted(missing_policy_commands)}"
     )
+if unknown_policy_commands := set(_COMMAND_POLICIES) - set(COMMAND_TYPES):
+    raise RuntimeError(
+        f"unknown command policy definitions: {sorted(unknown_policy_commands)}"
+    )
 
 
 def command_policies() -> dict[str, CommandPolicy]:
@@ -66,6 +75,105 @@ def get_command_policy(command: str) -> CommandPolicy:
 
 def dashboard_allowed_commands() -> set[str]:
     return {command for command, policy in _COMMAND_POLICIES.items() if policy.dashboard_allowed}
+
+
+def sender_only_commands() -> set[str]:
+    return {command for command, policy in _COMMAND_POLICIES.items() if policy.sender_only}
+
+
+def should_cancel_repeated_send_before_command(command: str) -> bool:
+    return not get_command_policy(command).preserves_repeat_schedule
+
+
+def _command_default_retry(command: str) -> dict[str, Any]:
+    default_retry = get_command_policy(command).default_retry
+    if not isinstance(default_retry, dict):
+        return {}
+    return dict(default_retry)
+
+
+def _coerce_min_int(value: Any, minimum: int) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < minimum:
+        return None
+    return parsed
+
+
+def command_retry_policy(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    if "interval_sec" in payload or "max_attempts" in payload:
+        return dict(payload)
+    retry = payload.get("retry")
+    if isinstance(retry, dict):
+        return dict(retry)
+    payload_retry = payload.get("_retry")
+    if isinstance(payload_retry, dict):
+        return dict(payload_retry)
+    return {}
+
+
+def resolve_retry_interval_seconds(
+    command: str,
+    retry_policy: Mapping[str, Any] | None,
+) -> int:
+    if parsed_interval := _coerce_min_int(
+        command_retry_policy(retry_policy).get("interval_sec"),
+        minimum=1,
+    ):
+        return parsed_interval
+
+    policy_default_interval = _coerce_min_int(
+        _command_default_retry(command).get("interval_sec"),
+        minimum=1,
+    )
+    if policy_default_interval is not None and command != "send_expected_tax_amounts":
+        return policy_default_interval
+    if policy_default_interval is None:
+        policy_default_interval = 300 if command == "send_expected_tax_amounts" else 1
+
+    raw_env_value = os.getenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", str(policy_default_interval))
+    env_interval = _coerce_min_int(raw_env_value, minimum=1)
+    if env_interval is not None:
+        return env_interval
+    return policy_default_interval
+
+
+def resolve_retry_max_attempts(
+    command: str,
+    retry_policy: Mapping[str, Any] | None,
+) -> int:
+    if parsed_attempts := _coerce_min_int(
+        command_retry_policy(retry_policy).get("max_attempts"),
+        minimum=1,
+    ):
+        return parsed_attempts
+
+    policy_default_attempts = _coerce_min_int(
+        _command_default_retry(command).get("max_attempts"),
+        minimum=1,
+    )
+    if policy_default_attempts is not None:
+        return policy_default_attempts
+    return 3
+
+
+def payload_has_explicit_tax_doc_ids(payload: Mapping[str, Any]) -> bool:
+    for key in ("tax_doc_ids", "taxDocIds", "taxDocIdSet"):
+        if payload.get(key):
+            return True
+    return False
+
+
+def should_schedule_repeated_send(command: str, payload: Mapping[str, Any]) -> bool:
+    if not get_command_policy(command).repeat_schedule_enabled:
+        return False
+    if payload.get("repeat") is True:
+        return True
+    return not payload_has_explicit_tax_doc_ids(payload)
 
 
 def _sanitize_command_for_response(command: dict[str, Any]) -> dict[str, Any]:

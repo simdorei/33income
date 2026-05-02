@@ -24,6 +24,20 @@
 - command별 “결정로직 위치 vs 실행로직 위치” 매트릭스
 - 중앙화 가능한 것/불가능한 것(브라우저 side-effect) 분류
 
+### Current Inventory Snapshot (2026-05-02)
+
+| Command | 결정/검증 위치 | 실행 위치 | 중앙화 판정 |
+|---|---|---|---|
+| `preview_send_targets` | `control_tower/service.py` policy + `control_tower/app.py` UI enqueue | `agent/runner.py` → `agent/browser_control.py` | 결정은 타워, 실행(side-effect)은 에이전트 유지 |
+| `send_expected_tax_amounts` | sender-only guard: `control_tower/service.py` + payload 정규화 라우트 `control_tower/app.py` | `agent/runner.py` → `browser_control.send_expected_tax_amounts` | 정책/입력은 타워, NewTA POST는 에이전트 |
+| `send_bookkeeping_expected_tax_amount` | sender-only guard: `control_tower/service.py` | `agent/runner.py` → `browser_control.py` | 동일 |
+| `send_rate_based_bookkeeping_expected_tax_amount` | sender-only guard: `control_tower/service.py` | `agent/runner.py` → `browser_control.py` | 동일 |
+| `preview_rate_based_bookkeeping_expected_tax_amounts` | sender-only + dashboard_allowed: `control_tower/service.py` | `agent/runner.py` → `browser_control.py` | 동일 |
+| `send_rate_based_bookkeeping_expected_tax_amounts` | sender-only + dashboard_allowed: `control_tower/service.py` | `agent/runner.py` → `browser_control.py` | 동일 |
+
+- **중앙화 가능한 영역(타워):** 명령 allowlist, sender-only 검증, dashboard enqueue 라우트, 목록 입력 파싱/중복제거.
+- **중앙화 불가능/제한 영역(에이전트):** 로그인 세션/CDP attach, NewTA HTTP 호출, heartbeat 반영, 반복발송 타이머(로컬 프로세스 메모리).
+
 ## Task 2: Command Schema 표준화
 **Objective:** 커맨드 폭증을 막는 표준 payload 구조를 정의한다.
 

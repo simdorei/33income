@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import time
 from typing import Any, Callable
 
@@ -28,6 +27,14 @@ from income33.agent.login import open_login_window
 from income33.bots.reporter import ReporterBotRunner
 from income33.bots.sender import SenderBotRunner
 from income33.config import AgentConfig, load_config
+from income33.control_tower.service import (
+    command_retry_policy,
+    resolve_retry_interval_seconds,
+    resolve_retry_max_attempts,
+    sender_only_commands,
+    should_cancel_repeated_send_before_command,
+    should_schedule_repeated_send,
+)
 from income33.logging_utils import setup_component_logger
 
 
@@ -49,30 +56,6 @@ _LOGIN_STATE_PROBE_STATUSES = {
     "manual_required",
     "session_active",
 }
-
-_SENDER_ONLY_COMMANDS = {
-    "send_expected_tax_amounts",
-    "send_bookkeeping_expected_tax_amount",
-    "send_rate_based_bookkeeping_expected_tax_amount",
-    "preview_rate_based_bookkeeping_expected_tax_amounts",
-    "send_rate_based_bookkeeping_expected_tax_amounts",
-}
-
-
-def _resolve_send_repeat_interval_seconds() -> int:
-    raw_value = os.getenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", "300")
-    try:
-        return max(1, int(raw_value))
-    except (TypeError, ValueError):
-        return 300
-
-
-def _payload_has_explicit_tax_doc_ids(payload: dict[str, Any]) -> bool:
-    for key in ("tax_doc_ids", "taxDocIds", "taxDocIdSet"):
-        value = payload.get(key)
-        if value:
-            return True
-    return False
 
 
 def _build_bot_runner(agent: AgentConfig):
@@ -129,15 +112,6 @@ class AgentRunner:
             return envelope_payload
         return parsed
 
-    @classmethod
-    def _command_retry_policy(cls, command: dict[str, Any]) -> dict[str, Any]:
-        parsed = cls._command_payload_json(command)
-        retry = parsed.get("retry")
-        if isinstance(retry, dict):
-            return retry
-        payload_retry = parsed.get("_retry")
-        return payload_retry if isinstance(payload_retry, dict) else {}
-
     def _set_bot_state(self, status: str, step: str | None = None) -> None:
         previous_status = self.bot.status
         self.bot.status = status
@@ -172,7 +146,7 @@ class AgentRunner:
         base_step = self._strip_repeat_send_wait_suffix(base_step)
         if remaining_seconds is None:
             if self._next_repeated_send_monotonic is None:
-                remaining_seconds = _resolve_send_repeat_interval_seconds()
+                remaining_seconds = resolve_retry_interval_seconds("send_expected_tax_amounts", None)
             else:
                 remaining_seconds = max(0, int(self._next_repeated_send_monotonic - self._monotonic()))
         return f"{base_step} / 다음발송 {remaining_seconds}초 후"
@@ -258,33 +232,14 @@ class AgentRunner:
             interval,
         )
 
-    @staticmethod
-    def _resolve_repeat_interval_seconds(retry_policy: dict[str, Any]) -> int:
-        raw_interval = retry_policy.get("interval_sec")
-        try:
-            interval = int(raw_interval)
-            if interval >= 1:
-                return interval
-        except (TypeError, ValueError):
-            pass
-        return _resolve_send_repeat_interval_seconds()
-
-    @staticmethod
-    def _resolve_repeat_max_attempts(retry_policy: dict[str, Any]) -> int:
-        raw_attempts = retry_policy.get("max_attempts")
-        try:
-            attempts = int(raw_attempts)
-            if attempts >= 1:
-                return attempts
-        except (TypeError, ValueError):
-            pass
-        return 3
-
     def _schedule_repeated_send(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
-        interval = self._resolve_repeat_interval_seconds(retry_policy)
+        interval = resolve_retry_interval_seconds("send_expected_tax_amounts", retry_policy)
         self._repeat_send_payload = dict(payload)
         self._repeat_send_payload["_repeat_interval_sec"] = interval
-        self._repeat_send_payload["_repeat_max_attempts"] = self._resolve_repeat_max_attempts(retry_policy)
+        self._repeat_send_payload["_repeat_max_attempts"] = resolve_retry_max_attempts(
+            "send_expected_tax_amounts",
+            retry_policy,
+        )
         self._next_repeated_send_monotonic = self._monotonic() + interval
         self._repeat_send_attempt_counts = {}
         self.logger.info(
@@ -332,8 +287,14 @@ class AgentRunner:
             return
 
         payload = dict(self._repeat_send_payload)
-        interval = int(payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
-        max_attempts = int(payload.get("_repeat_max_attempts") or 3)
+        interval = resolve_retry_interval_seconds(
+            "send_expected_tax_amounts",
+            {"interval_sec": payload.get("_repeat_interval_sec")},
+        )
+        max_attempts = resolve_retry_max_attempts(
+            "send_expected_tax_amounts",
+            {"max_attempts": payload.get("_repeat_max_attempts")},
+        )
         send_payload = {k: v for k, v in payload.items() if not str(k).startswith("_repeat_")}
         try:
             self._set_bot_state("session_active", "계산발송 반복 새로고침 중")
@@ -479,15 +440,21 @@ class AgentRunner:
         )
         result_status = str(result.get("status") or "session_active")
         result_step = str(result.get("current_step") or "계산발송 완료")
-        if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
+        if should_schedule_repeated_send("send_expected_tax_amounts", payload):
             self._schedule_repeated_send(payload, retry_policy)
-            repeat_max_attempts = int(self._repeat_send_payload.get("_repeat_max_attempts") or 3)
+            repeat_max_attempts = resolve_retry_max_attempts(
+                "send_expected_tax_amounts",
+                {"max_attempts": self._repeat_send_payload.get("_repeat_max_attempts")},
+            )
             self._track_repeat_send_attempts(
                 self._repeat_send_attempt_counts,
                 list(result.get("tax_doc_ids") or []),
                 max_attempts=repeat_max_attempts,
             )
-            repeat_interval = int(self._repeat_send_payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
+            repeat_interval = resolve_retry_interval_seconds(
+                "send_expected_tax_amounts",
+                {"interval_sec": self._repeat_send_payload.get("_repeat_interval_sec")},
+            )
             result_step = self._repeat_send_wait_step(
                 result_step,
                 remaining_seconds=repeat_interval,
@@ -592,19 +559,20 @@ class AgentRunner:
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
         command_id = command["id"]
+        parsed_payload = self._command_payload_json(command)
         payload = self._command_payload(command)
-        retry_policy = self._command_retry_policy(command)
+        retry_policy = command_retry_policy(parsed_payload)
         self.logger.info(
             "command_received command_id=%s command=%s bot_id=%s",
             command_id,
             command_name,
             self.agent.bot_id,
         )
-        if command_name not in {"status", "send_expected_tax_amounts"}:
+        if should_cancel_repeated_send_before_command(command_name):
             self._cancel_repeated_send()
 
         try:
-            if self.agent.bot_type != "sender" and command_name in _SENDER_ONLY_COMMANDS:
+            if self.agent.bot_type != "sender" and command_name in sender_only_commands():
                 raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
             self._dispatch_command(command_name, payload, retry_policy)
         except Exception as exc:
