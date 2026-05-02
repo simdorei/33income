@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from income33.config import AppConfig, load_config
-from income33.control_tower.service import ControlTowerService
+from income33.control_tower.service import ControlTowerService, dashboard_allowed_commands
 from income33.db import Database
 from income33.logging_utils import setup_component_logger
 from income33.models import CommandCompleteRequest, CommandRequest, HeartbeatRequest
@@ -19,20 +19,7 @@ setup_component_logger("income33.control_tower", "control_tower.log")
 logger = logging.getLogger("income33.control_tower.app")
 
 
-DASHBOARD_ALLOWED_COMMANDS = {
-    "start",
-    "stop",
-    "restart",
-    "status",
-    "open_login",
-    "login_done",
-    "fill_login",
-    "refresh_page",
-    "preview_send_targets",
-    "send_expected_tax_amounts",
-    "preview_rate_based_bookkeeping_expected_tax_amounts",
-    "send_rate_based_bookkeeping_expected_tax_amounts",
-}
+DASHBOARD_ALLOWED_COMMANDS = dashboard_allowed_commands()
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
     ("발송 봇 01-09", "sender", 1, 9, 0),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from income33.db import Database
@@ -8,13 +9,53 @@ from income33.db import Database
 logger = logging.getLogger("income33.control_tower.service")
 
 
-_SENDER_ONLY_COMMANDS = {
-    "send_expected_tax_amounts",
-    "send_bookkeeping_expected_tax_amount",
-    "send_rate_based_bookkeeping_expected_tax_amount",
-    "preview_rate_based_bookkeeping_expected_tax_amounts",
-    "send_rate_based_bookkeeping_expected_tax_amounts",
+@dataclass(frozen=True)
+class CommandPolicy:
+    sender_only: bool = False
+    dashboard_allowed: bool = False
+    default_retry: dict[str, Any] | None = None
+
+
+_DEFAULT_POLICY = CommandPolicy()
+
+
+_COMMAND_POLICIES: dict[str, CommandPolicy] = {
+    "start": CommandPolicy(dashboard_allowed=True),
+    "stop": CommandPolicy(dashboard_allowed=True),
+    "restart": CommandPolicy(dashboard_allowed=True),
+    "status": CommandPolicy(dashboard_allowed=True),
+    "open_login": CommandPolicy(dashboard_allowed=True),
+    "login_done": CommandPolicy(dashboard_allowed=True),
+    "fill_login": CommandPolicy(dashboard_allowed=True),
+    "refresh_page": CommandPolicy(dashboard_allowed=True),
+    "preview_send_targets": CommandPolicy(dashboard_allowed=True),
+    "submit_auth_code": CommandPolicy(),
+    "send_expected_tax_amounts": CommandPolicy(
+        sender_only=True,
+        dashboard_allowed=True,
+        default_retry={"interval_sec": 300, "max_attempts": 3},
+    ),
+    "send_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
+    "send_rate_based_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
+    "preview_rate_based_bookkeeping_expected_tax_amounts": CommandPolicy(
+        sender_only=True,
+        dashboard_allowed=True,
+        default_retry={"interval_sec": 60, "max_attempts": 2},
+    ),
+    "send_rate_based_bookkeeping_expected_tax_amounts": CommandPolicy(
+        sender_only=True,
+        dashboard_allowed=True,
+        default_retry={"interval_sec": 60, "max_attempts": 2},
+    ),
 }
+
+
+def get_command_policy(command: str) -> CommandPolicy:
+    return _COMMAND_POLICIES.get(command, _DEFAULT_POLICY)
+
+
+def dashboard_allowed_commands() -> set[str]:
+    return {command for command, policy in _COMMAND_POLICIES.items() if policy.dashboard_allowed}
 
 
 def _sanitize_command_for_response(command: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +129,10 @@ class ControlTowerService:
             normalized["_meta"] = payload["meta"]
         if isinstance(payload.get("retry"), dict):
             normalized["_retry"] = payload["retry"]
+
+        policy = get_command_policy(command)
+        if policy.default_retry is not None and "_retry" not in normalized:
+            normalized["_retry"] = dict(policy.default_retry)
         return normalized
 
     def queue_bot_command(
@@ -100,7 +145,8 @@ class ControlTowerService:
         if bot is None:
             raise KeyError(f"bot not found: {bot_id}")
         payload = self._normalize_command_payload(bot=bot, command=command, payload=payload)
-        if command in _SENDER_ONLY_COMMANDS and bot.get("bot_type") != "sender":
+        policy = get_command_policy(command)
+        if policy.sender_only and bot.get("bot_type") != "sender":
             raise ValueError("expected tax amount commands are only allowed for sender bots")
 
         queued = self.db.enqueue_command(

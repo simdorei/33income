@@ -2,7 +2,11 @@ from fastapi.testclient import TestClient
 
 from income33.config import AppConfig, ControlTowerConfig
 from income33.control_tower.app import create_app
-from income33.control_tower.service import ControlTowerService
+from income33.control_tower.service import (
+    ControlTowerService,
+    dashboard_allowed_commands,
+    get_command_policy,
+)
 from income33.db import Database
 
 
@@ -15,6 +19,33 @@ def build_client(tmp_path):
     service = ControlTowerService(db=db, bootstrap_agent_count=18)
     app = create_app(config=config, service=service)
     return TestClient(app)
+
+
+def test_command_policy_centralizes_dashboard_allowlist_and_sender_only_guardrails():
+    allowed = dashboard_allowed_commands()
+    assert "open_login" in allowed
+    assert "send_expected_tax_amounts" in allowed
+    assert "submit_auth_code" not in allowed
+
+    assert get_command_policy("send_expected_tax_amounts").sender_only is True
+    assert get_command_policy("open_login").sender_only is False
+
+
+def test_default_retry_hint_applies_when_not_provided(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_expected_tax_amounts"
+    assert '"_retry": {"interval_sec": 300, "max_attempts": 3}' in commands[0]["payload_json"]
 
 
 def test_summary_and_root_dashboard(tmp_path):
