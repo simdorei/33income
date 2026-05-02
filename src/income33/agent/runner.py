@@ -29,6 +29,7 @@ from income33.bots.sender import SenderBotRunner
 from income33.config import AgentConfig, load_config
 from income33.control_tower.service import (
     command_retry_policy,
+    payload_has_explicit_tax_doc_ids,
     resolve_retry_interval_seconds,
     resolve_retry_max_attempts,
     sender_only_commands,
@@ -100,17 +101,59 @@ class AgentRunner:
             return raw_payload
         try:
             parsed = json.loads(raw_payload)
-        except (TypeError, json.JSONDecodeError):
-            return {}
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("payload_json must be valid JSON") from exc
         return parsed if isinstance(parsed, dict) else {}
 
     @classmethod
-    def _command_payload(cls, command: dict[str, Any]) -> dict[str, Any]:
-        parsed = cls._command_payload_json(command)
+    def _command_payload(cls, command: dict[str, Any], parsed: dict[str, Any] | None = None) -> dict[str, Any]:
+        if parsed is None:
+            parsed = cls._command_payload_json(command)
         envelope_payload = parsed.get("payload")
         if isinstance(envelope_payload, dict):
             return envelope_payload
         return parsed
+
+    @staticmethod
+    def _normalize_tax_doc_ids(raw_tax_doc_ids: Any) -> list[int]:
+        if isinstance(raw_tax_doc_ids, str):
+            raw_ids: list[Any] = [part.strip() for part in raw_tax_doc_ids.split(",") if part.strip()]
+        elif isinstance(raw_tax_doc_ids, list):
+            raw_ids = raw_tax_doc_ids
+        else:
+            return []
+
+        normalized_tax_doc_ids: list[int] = []
+        seen_tax_doc_ids: set[int] = set()
+        for raw_tax_doc_id in raw_ids:
+            if isinstance(raw_tax_doc_id, bool):
+                continue
+            try:
+                tax_doc_id = int(raw_tax_doc_id)
+            except (TypeError, ValueError):
+                continue
+            if tax_doc_id <= 0 or tax_doc_id in seen_tax_doc_ids:
+                continue
+            seen_tax_doc_ids.add(tax_doc_id)
+            normalized_tax_doc_ids.append(tax_doc_id)
+        return normalized_tax_doc_ids
+
+    @classmethod
+    def _normalize_send_tax_doc_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_payload = dict(payload)
+        raw_tax_doc_ids: Any = None
+        has_tax_doc_ids = False
+        for key in ("tax_doc_ids", "taxDocIds", "taxDocIdSet"):
+            if key in normalized_payload:
+                raw_tax_doc_ids = normalized_payload.get(key)
+                has_tax_doc_ids = True
+                break
+        if not has_tax_doc_ids:
+            return normalized_payload
+        normalized_payload["tax_doc_ids"] = cls._normalize_tax_doc_ids(raw_tax_doc_ids)
+        normalized_payload.pop("taxDocIds", None)
+        normalized_payload.pop("taxDocIdSet", None)
+        return normalized_payload
 
     def _set_bot_state(self, status: str, step: str | None = None) -> None:
         previous_status = self.bot.status
@@ -232,7 +275,13 @@ class AgentRunner:
             interval,
         )
 
-    def _schedule_repeated_send(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+    def _schedule_repeated_send(
+        self,
+        payload: dict[str, Any],
+        retry_policy: dict[str, Any],
+        *,
+        enable_fallback_assignment: bool,
+    ) -> None:
         interval = resolve_retry_interval_seconds("send_expected_tax_amounts", retry_policy)
         self._repeat_send_payload = dict(payload)
         self._repeat_send_payload["_repeat_interval_sec"] = interval
@@ -240,13 +289,15 @@ class AgentRunner:
             "send_expected_tax_amounts",
             retry_policy,
         )
+        self._repeat_send_payload["_repeat_fallback_assignment_enabled"] = bool(enable_fallback_assignment)
         self._next_repeated_send_monotonic = self._monotonic() + interval
         self._repeat_send_attempt_counts = {}
         self.logger.info(
-            "send_repeat_scheduled bot_id=%s interval=%s max_attempts=%s",
+            "send_repeat_scheduled bot_id=%s interval=%s max_attempts=%s fallback_assignment_enabled=%s",
             self.agent.bot_id,
             interval,
             self._repeat_send_payload["_repeat_max_attempts"],
+            self._repeat_send_payload["_repeat_fallback_assignment_enabled"],
         )
 
     def _cancel_repeated_send(self) -> None:
@@ -257,19 +308,15 @@ class AgentRunner:
         self._next_repeated_send_monotonic = None
         self._repeat_send_attempt_counts = {}
 
-    @staticmethod
+    @classmethod
     def _track_repeat_send_attempts(
+        cls,
         attempt_counts: dict[int, int],
-        tax_doc_ids: list[int],
+        tax_doc_ids: Any,
         max_attempts: int,
     ) -> list[int]:
         fallback_tax_doc_ids: list[int] = []
-        for raw_tax_doc_id in tax_doc_ids:
-            if isinstance(raw_tax_doc_id, bool):
-                continue
-            tax_doc_id = int(raw_tax_doc_id)
-            if tax_doc_id <= 0:
-                continue
+        for tax_doc_id in cls._normalize_tax_doc_ids(tax_doc_ids):
             next_attempt = attempt_counts.get(tax_doc_id, 0) + 1
             attempt_counts[tax_doc_id] = next_attempt
             if next_attempt >= max_attempts:
@@ -295,7 +342,9 @@ class AgentRunner:
             "send_expected_tax_amounts",
             {"max_attempts": payload.get("_repeat_max_attempts")},
         )
+        fallback_assignment_enabled = bool(payload.get("_repeat_fallback_assignment_enabled", True))
         send_payload = {k: v for k, v in payload.items() if not str(k).startswith("_repeat_")}
+        send_payload = self._normalize_send_tax_doc_payload(send_payload)
         try:
             self._set_bot_state("session_active", "계산발송 반복 새로고침 중")
             self._send_current_state_heartbeat()
@@ -314,17 +363,26 @@ class AgentRunner:
                 logger=logging.getLogger("income33.agent.browser_control"),
             )
         except Exception as exc:
-            self._cancel_repeated_send()
-            self._set_bot_state("manual_required", f"계산발송 실패: {exc}")
+            self._next_repeated_send_monotonic = now + interval
+            self._set_bot_state(
+                "session_active",
+                self._repeat_send_wait_step(f"계산발송 실패: {exc}", remaining_seconds=interval),
+            )
             self._send_current_state_heartbeat()
-            self.logger.exception("send_repeat_failed bot_id=%s", self.agent.bot_id)
+            self.logger.exception(
+                "send_repeat_failed bot_id=%s next_interval=%s",
+                self.agent.bot_id,
+                interval,
+            )
             return
 
-        fallback_tax_doc_ids = self._track_repeat_send_attempts(
-            self._repeat_send_attempt_counts,
-            list(result.get("tax_doc_ids") or []),
-            max_attempts=max_attempts,
-        )
+        fallback_tax_doc_ids: list[int] = []
+        if fallback_assignment_enabled:
+            fallback_tax_doc_ids = self._track_repeat_send_attempts(
+                self._repeat_send_attempt_counts,
+                list(result.get("tax_doc_ids") or []),
+                max_attempts=max_attempts,
+            )
         if fallback_tax_doc_ids:
             try:
                 assign_result = assign_taxdocs_to_current_accountant(
@@ -431,26 +489,33 @@ class AgentRunner:
 
     def _handle_send_expected_tax_amounts(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
         self._cancel_repeated_send()
+        normalized_payload = self._normalize_send_tax_doc_payload(payload)
+        has_explicit_tax_doc_ids = payload_has_explicit_tax_doc_ids(normalized_payload)
         self._set_bot_state("session_active", "계산발송 중")
         self._send_current_state_heartbeat()
         result = send_expected_tax_amounts(
             bot_id=self.agent.bot_id,
-            payload=payload,
+            payload=normalized_payload,
             logger=logging.getLogger("income33.agent.browser_control"),
         )
         result_status = str(result.get("status") or "session_active")
         result_step = str(result.get("current_step") or "계산발송 완료")
-        if should_schedule_repeated_send("send_expected_tax_amounts", payload):
-            self._schedule_repeated_send(payload, retry_policy)
+        if should_schedule_repeated_send("send_expected_tax_amounts", normalized_payload):
+            self._schedule_repeated_send(
+                normalized_payload,
+                retry_policy,
+                enable_fallback_assignment=not has_explicit_tax_doc_ids,
+            )
             repeat_max_attempts = resolve_retry_max_attempts(
                 "send_expected_tax_amounts",
                 {"max_attempts": self._repeat_send_payload.get("_repeat_max_attempts")},
             )
-            self._track_repeat_send_attempts(
-                self._repeat_send_attempt_counts,
-                list(result.get("tax_doc_ids") or []),
-                max_attempts=repeat_max_attempts,
-            )
+            if not has_explicit_tax_doc_ids:
+                self._track_repeat_send_attempts(
+                    self._repeat_send_attempt_counts,
+                    list(result.get("tax_doc_ids") or []),
+                    max_attempts=repeat_max_attempts,
+                )
             repeat_interval = resolve_retry_interval_seconds(
                 "send_expected_tax_amounts",
                 {"interval_sec": self._repeat_send_payload.get("_repeat_interval_sec")},
@@ -564,9 +629,6 @@ class AgentRunner:
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
         command_id = command["id"]
-        parsed_payload = self._command_payload_json(command)
-        payload = self._command_payload(command)
-        retry_policy = command_retry_policy(parsed_payload)
         self.logger.info(
             "command_received command_id=%s command=%s bot_id=%s",
             command_id,
@@ -577,6 +639,9 @@ class AgentRunner:
             self._cancel_repeated_send()
 
         try:
+            parsed_payload = self._command_payload_json(command)
+            payload = self._command_payload(command, parsed_payload)
+            retry_policy = command_retry_policy(parsed_payload)
             if self.agent.bot_type != "sender" and command_name in sender_only_commands():
                 raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
             self._dispatch_command(command_name, payload, retry_policy)

@@ -213,6 +213,33 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_fails_send_command_when_payload_json_is_invalid_json(monkeypatch):
+    calls = []
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "계산발송 완료"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, client = build_runner(
+        [{"id": 141, "command": "send_expected_tax_amounts", "payload_json": '{"tax_doc_ids":[1,2]'}]
+    )
+
+    runner.run_once()
+
+    assert calls == []
+    assert client.completed == [
+        {
+            "command_id": 141,
+            "status": "failed",
+            "error_message": "payload_json must be valid JSON",
+        }
+    ]
+    assert client.heartbeats[-1]["bot_status"] == "manual_required"
+    assert client.heartbeats[-1]["current_step"] == "계산발송 실패: payload_json must be valid JSON"
+
+
 def test_runner_rejects_sender_only_command_on_reporter(monkeypatch):
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     runner, client = build_runner(
@@ -466,6 +493,143 @@ def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monke
     assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_ids": [1360165]}}]
 
 
+def test_runner_normalizes_tax_doc_ids_before_send(monkeypatch):
+    calls = []
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "계산발송 완료"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    runner, _ = build_runner(
+        [
+            {
+                "id": 181,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"tax_doc_ids": [1360165, "1360165", 0, -7, True, "1360211", "bad"]}),
+            }
+        ]
+    )
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_ids": [1360165, 1360211]}}]
+
+
+def test_runner_repeat_with_explicit_tax_doc_ids_skips_fallback_assignment_loop(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0, 1300.0])
+    send_calls = []
+    assign_calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": f"계산발송 완료 #{len(send_calls)}",
+            "tax_doc_ids": [555, 556],
+        }
+
+    def fake_assign_taxdocs_to_current_accountant(*, bot_id, tax_doc_ids, payload, logger):
+        assign_calls.append({"bot_id": bot_id, "tax_doc_ids": tax_doc_ids, "payload": payload})
+        return {"status": "session_active", "current_step": "잔여목록 배정 완료 2건 담당자=817 status=200"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    stub_repeat_force_refresh(monkeypatch)
+    monkeypatch.setattr(
+        "income33.agent.runner.assign_taxdocs_to_current_accountant",
+        fake_assign_taxdocs_to_current_accountant,
+    )
+    runner, _ = build_runner(
+        [
+            {
+                "id": 182,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps(
+                    {
+                        "tax_doc_ids": [555, "555", -1, True, "556", "bad"],
+                        "repeat": True,
+                        "_retry": {"interval_sec": 300, "max_attempts": 2},
+                    }
+                ),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+
+    assert len(send_calls) == 2
+    assert send_calls == [
+        {
+            "bot_id": "sender-01",
+            "payload": {
+                "tax_doc_ids": [555, 556],
+                "repeat": True,
+                "_retry": {"interval_sec": 300, "max_attempts": 2},
+            },
+        },
+        {
+            "bot_id": "sender-01",
+            "payload": {
+                "tax_doc_ids": [555, 556],
+                "repeat": True,
+                "_retry": {"interval_sec": 300, "max_attempts": 2},
+            },
+        },
+    ]
+    assert assign_calls == []
+
+
+def test_runner_repeat_send_failure_keeps_retry_scheduled_until_stop(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0, 1300.0, 1600.0, 1600.0])
+    refresh_calls = []
+    send_calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        if len(send_calls) == 2:
+            raise RuntimeError("send api failed")
+        return {"status": "session_active", "current_step": f"계산발송 완료 #{len(send_calls)}"}
+
+    def fake_refresh_page(*, bot_id, payload, logger):
+        refresh_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_refresh"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    monkeypatch.setattr("income33.agent.runner.refresh_page", fake_refresh_page)
+    runner, client = build_runner(
+        [
+            {
+                "id": 184,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "repeat": True, "_retry": {"interval_sec": 300}}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()  # initial send success + repeat schedule
+    runner.run_once()  # repeated send fails but schedule must remain
+    runner.run_once()  # next interval retries again
+
+    assert len(send_calls) == 3
+    assert len(refresh_calls) == 2
+    assert client.heartbeats[-1]["bot_status"] == "session_active"
+    assert "다음발송" in client.heartbeats[-1]["current_step"]
+    assert runner._repeat_send_payload is not None
+    assert runner._next_repeated_send_monotonic is not None
+
+
 def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
     monotonic_points = iter([1000.0, 1299.0, 1299.0, 1300.0, 1300.0])
     calls = []
@@ -594,6 +758,57 @@ def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monk
 
     assert len(send_calls) == 2
     assert assign_calls == []
+
+
+def test_runner_repeat_fallback_assignment_normalizes_tax_doc_ids(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0, 1300.0])
+    send_calls = []
+    assign_calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        return {
+            "status": "session_active",
+            "current_step": "계산발송 완료",
+            "tax_doc_ids": [555, "555", 0, -1, True, "556", "556", "bad", 556],
+        }
+
+    def fake_assign_taxdocs_to_current_accountant(*, bot_id, tax_doc_ids, payload, logger):
+        assign_calls.append({"bot_id": bot_id, "tax_doc_ids": tax_doc_ids, "payload": payload})
+        return {"status": "session_active", "current_step": "잔여목록 배정 완료 2건 담당자=817 status=200"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    stub_repeat_force_refresh(monkeypatch)
+    monkeypatch.setattr(
+        "income33.agent.runner.assign_taxdocs_to_current_accountant",
+        fake_assign_taxdocs_to_current_accountant,
+    )
+    runner, _ = build_runner(
+        [
+            {
+                "id": 183,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "_retry": {"interval_sec": 300, "max_attempts": 2}}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    runner.run_once()
+
+    assert len(send_calls) == 2
+    assert assign_calls == [
+        {
+            "bot_id": "sender-01",
+            "tax_doc_ids": [555, 556],
+            "payload": {"year": 2025, "_retry": {"interval_sec": 300, "max_attempts": 2}},
+        }
+    ]
 
 
 def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypatch):
