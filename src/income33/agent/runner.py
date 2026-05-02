@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from typing import Any, Callable
 
@@ -84,6 +85,7 @@ class AgentRunner:
         self._repeat_send_payload: dict[str, Any] | None = None
         self._next_repeated_send_monotonic: float | None = None
         self._repeat_send_attempt_counts: dict[int, int] = {}
+        self._repeat_send_failure_count: int = 0
         self._failure_step_messages: dict[str, str] = {
             "send_expected_tax_amounts": "계산발송 실패",
             "send_bookkeeping_expected_tax_amount": "단건 계산발송 실패",
@@ -184,6 +186,16 @@ class AgentRunner:
     @staticmethod
     def _strip_repeat_send_wait_suffix(step: str) -> str:
         return step.split(" / 다음발송 ", 1)[0]
+
+    @staticmethod
+    def _extract_status_code(text: str) -> int | None:
+        match = re.search(r"status\s*=\s*(\d{3})", text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
     def _repeat_send_wait_step(self, base_step: str, remaining_seconds: int | None = None) -> str:
         base_step = self._strip_repeat_send_wait_suffix(base_step)
@@ -292,6 +304,7 @@ class AgentRunner:
         self._repeat_send_payload["_repeat_fallback_assignment_enabled"] = bool(enable_fallback_assignment)
         self._next_repeated_send_monotonic = self._monotonic() + interval
         self._repeat_send_attempt_counts = {}
+        self._repeat_send_failure_count = 0
         self.logger.info(
             "send_repeat_scheduled bot_id=%s interval=%s max_attempts=%s fallback_assignment_enabled=%s",
             self.agent.bot_id,
@@ -307,6 +320,7 @@ class AgentRunner:
         self._repeat_send_payload = None
         self._next_repeated_send_monotonic = None
         self._repeat_send_attempt_counts = {}
+        self._repeat_send_failure_count = 0
 
     @classmethod
     def _track_repeat_send_attempts(
@@ -363,16 +377,23 @@ class AgentRunner:
                 logger=logging.getLogger("income33.agent.browser_control"),
             )
         except Exception as exc:
+            self._repeat_send_failure_count += 1
+            status_code = self._extract_status_code(str(exc))
             self._next_repeated_send_monotonic = now + interval
             self._set_bot_state(
                 "session_active",
-                self._repeat_send_wait_step(f"계산발송 실패: {exc}", remaining_seconds=interval),
+                self._repeat_send_wait_step(
+                    f"계산발송 실패({self._repeat_send_failure_count}회): {exc}",
+                    remaining_seconds=interval,
+                ),
             )
             self._send_current_state_heartbeat()
             self.logger.exception(
-                "send_repeat_failed bot_id=%s next_interval=%s",
+                "send_repeat_failed bot_id=%s next_interval=%s failure_count=%s status=%s",
                 self.agent.bot_id,
                 interval,
+                self._repeat_send_failure_count,
+                status_code,
             )
             return
 
@@ -403,6 +424,7 @@ class AgentRunner:
             result = assign_result
 
         self._next_repeated_send_monotonic = now + interval
+        self._repeat_send_failure_count = 0
         result_step = str(result.get("current_step") or "계산발송 완료")
         self._set_bot_state(
             str(result.get("status") or "session_active"),

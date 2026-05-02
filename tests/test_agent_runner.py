@@ -626,6 +626,7 @@ def test_runner_repeat_send_failure_keeps_retry_scheduled_until_stop(monkeypatch
     assert len(refresh_calls) == 2
     assert client.heartbeats[-1]["bot_status"] == "session_active"
     assert "다음발송" in client.heartbeats[-1]["current_step"]
+    assert any("계산발송 실패(1회): send api failed / 다음발송 300초 후" in hb["current_step"] for hb in client.heartbeats)
     assert runner._repeat_send_payload is not None
     assert runner._next_repeated_send_monotonic is not None
 
