@@ -35,10 +35,6 @@ CommandType = Literal[
     "refresh_page",
     "preview_send_targets",
     "send_expected_tax_amounts",
-    "send_bookkeeping_expected_tax_amount",
-    "send_rate_based_bookkeeping_expected_tax_amount",
-    "preview_rate_based_bookkeeping_expected_tax_amounts",
-    "send_rate_based_bookkeeping_expected_tax_amounts",
 ]
 CommandStatus = Literal["pending", "running", "done", "failed"]
 

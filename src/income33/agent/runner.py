@@ -14,13 +14,9 @@ from income33.agent.browser_control import (
     is_keepalive_due,
     is_refresh_enabled,
     preview_expected_tax_send_targets,
-    preview_rate_based_bookkeeping_expected_tax_amounts,
     refresh_page,
     resolve_refresh_interval_seconds,
-    send_bookkeeping_expected_tax_amount,
     send_expected_tax_amounts,
-    send_rate_based_bookkeeping_expected_tax_amount,
-    send_rate_based_bookkeeping_expected_tax_amounts,
     submit_auth_code,
 )
 from income33.agent.client import ControlTowerClient
@@ -276,15 +272,6 @@ class AgentRunner:
         payload = dict(self._repeat_send_payload)
         interval = _resolve_send_repeat_interval_seconds()
         try:
-            self._set_bot_state("session_active", "계산발송 반복 새로고침 중")
-            self._send_current_state_heartbeat()
-            refresh_payload = dict(payload)
-            refresh_payload["force"] = True
-            refresh_page(
-                bot_id=self.agent.bot_id,
-                payload=refresh_payload,
-                logger=logging.getLogger("income33.agent.browser_control"),
-            )
             self._set_bot_state("session_active", "계산발송 반복 중")
             self._send_current_state_heartbeat()
             result = send_expected_tax_amounts(
@@ -435,58 +422,6 @@ class AgentRunner:
                         remaining_seconds=_resolve_send_repeat_interval_seconds(),
                     )
                 self._set_bot_state(result_status, result_step)
-            elif command_name == "send_bookkeeping_expected_tax_amount":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "단건 계산발송 중")
-                self._send_current_state_heartbeat()
-                result = send_bookkeeping_expected_tax_amount(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "단건 계산발송 완료"),
-                )
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amount":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "경비율 장부 계산발송 중")
-                self._send_current_state_heartbeat()
-                result = send_rate_based_bookkeeping_expected_tax_amount(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "경비율 장부 계산발송 완료"),
-                )
-            elif command_name == "preview_rate_based_bookkeeping_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "일괄세션 확인 중")
-                self._send_current_state_heartbeat()
-                result = preview_rate_based_bookkeeping_expected_tax_amounts(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "일괄세션 확인 완료"),
-                )
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amounts":
-                self._cancel_repeated_send()
-                self._set_bot_state("session_active", "일괄 경비율 장부발송 중")
-                self._send_current_state_heartbeat()
-                result = send_rate_based_bookkeeping_expected_tax_amounts(
-                    bot_id=self.agent.bot_id,
-                    payload=payload,
-                    logger=logging.getLogger("income33.agent.browser_control"),
-                )
-                self._set_bot_state(
-                    str(result.get("status") or "session_active"),
-                    str(result.get("current_step") or "일괄 경비율 장부발송 완료"),
-                )
             elif command_name == "login_done":
                 self._set_bot_state("idle", "idle")
                 self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
@@ -497,14 +432,6 @@ class AgentRunner:
             if command_name == "send_expected_tax_amounts":
                 self._cancel_repeated_send()
                 self._set_bot_state("manual_required", f"계산발송 실패: {exc}")
-            elif command_name == "send_bookkeeping_expected_tax_amount":
-                self._set_bot_state("manual_required", f"단건 계산발송 실패: {exc}")
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amount":
-                self._set_bot_state("manual_required", f"경비율 장부 계산발송 실패: {exc}")
-            elif command_name == "preview_rate_based_bookkeeping_expected_tax_amounts":
-                self._set_bot_state("manual_required", f"일괄세션 확인 실패: {exc}")
-            elif command_name == "send_rate_based_bookkeeping_expected_tax_amounts":
-                self._set_bot_state("manual_required", f"일괄 경비율 장부발송 실패: {exc}")
             self.client.complete_command(
                 command_id=command_id,
                 status="failed",

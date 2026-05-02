@@ -41,17 +41,6 @@ def build_runner(commands=None, monotonic_fn=None):
     return AgentRunner(agent=agent, client=client, monotonic_fn=monotonic_fn), client
 
 
-def stub_repeat_force_refresh(monkeypatch):
-    calls = []
-
-    def fake_refresh_page(*, bot_id, payload, logger):
-        calls.append({"bot_id": bot_id, "payload": payload})
-        return {"status": "session_active", "current_step": "session_refresh", "force": True}
-
-    monkeypatch.setattr("income33.agent.runner.refresh_page", fake_refresh_page)
-    return calls
-
-
 def test_runner_handles_open_login_command(monkeypatch, tmp_path):
     calls = []
 
@@ -190,7 +179,6 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
         }
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -209,137 +197,6 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
-def test_runner_handles_send_bookkeeping_expected_tax_amount_command(monkeypatch):
-    calls = []
-
-    def fake_send_bookkeeping_expected_tax_amount(*, bot_id, payload, logger):
-        calls.append({"bot_id": bot_id, "payload": payload})
-        assert client.heartbeats[-1]["current_step"] == "단건 계산발송 중"
-        return {
-            "status": "session_active",
-            "current_step": "단건 계산발송 완료 taxDocId=1345836 추가경비=27543987 예상세액=-621639 지방세=-62164 수수료=185000 status=200",
-        }
-
-    monkeypatch.setattr(
-        "income33.agent.runner.send_bookkeeping_expected_tax_amount",
-        fake_send_bookkeeping_expected_tax_amount,
-    )
-    runner, client = build_runner(
-        [
-            {
-                "id": 25,
-                "command": "send_bookkeeping_expected_tax_amount",
-                "payload_json": json.dumps(
-                    {
-                        "tax_doc_id": 1345836,
-                        "submit_account_type": "CUSTOMER",
-                        "total_business_expense_amount": 41538144,
-                    }
-                ),
-            }
-        ]
-    )
-
-    runner.run_once()
-
-    assert calls == [
-        {
-            "bot_id": "sender-01",
-            "payload": {
-                "tax_doc_id": 1345836,
-                "submit_account_type": "CUSTOMER",
-                "total_business_expense_amount": 41538144,
-            },
-        }
-    ]
-    assert client.completed == [{"command_id": 25, "status": "done", "error_message": None}]
-    assert runner.bot.status == "session_active"
-    assert client.heartbeats[-1]["current_step"] == "단건 계산발송 완료 taxDocId=1345836 추가경비=27543987 예상세액=-621639 지방세=-62164 수수료=185000 status=200"
-
-
-def test_runner_handles_send_rate_based_bookkeeping_expected_tax_amount_command(monkeypatch):
-    calls = []
-
-    def fake_send_rate_based_bookkeeping_expected_tax_amount(*, bot_id, payload, logger):
-        calls.append({"bot_id": bot_id, "payload": payload})
-        assert client.heartbeats[-1]["current_step"] == "경비율 장부 계산발송 중"
-        return {
-            "status": "session_active",
-            "current_step": "경비율 계산 패스 taxDocId=1348568 customType=다 status=200",
-            "skipped": True,
-        }
-
-    monkeypatch.setattr(
-        "income33.agent.runner.send_rate_based_bookkeeping_expected_tax_amount",
-        fake_send_rate_based_bookkeeping_expected_tax_amount,
-    )
-    runner, client = build_runner(
-        [
-            {
-                "id": 26,
-                "command": "send_rate_based_bookkeeping_expected_tax_amount",
-                "payload_json": json.dumps({"tax_doc_id": 1348568}),
-            }
-        ]
-    )
-
-    runner.run_once()
-
-    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_id": 1348568}}]
-    assert client.completed == [{"command_id": 26, "status": "done", "error_message": None}]
-    assert runner.bot.status == "session_active"
-    assert client.heartbeats[-1]["current_step"] == "경비율 계산 패스 taxDocId=1348568 customType=다 status=200"
-
-
-def test_runner_handles_bulk_rate_based_bookkeeping_commands(monkeypatch):
-    calls = []
-
-    def fake_preview_rate_based_bookkeeping_expected_tax_amounts(*, bot_id, payload, logger):
-        calls.append({"command": "preview", "bot_id": bot_id, "payload": payload})
-        assert client.heartbeats[-1]["current_step"] == "일괄세션 확인 중"
-        return {"status": "session_active", "current_step": "일괄세션 확인 2건"}
-
-    def fake_send_rate_based_bookkeeping_expected_tax_amounts(*, bot_id, payload, logger):
-        calls.append({"command": "send", "bot_id": bot_id, "payload": payload})
-        assert client.heartbeats[-1]["current_step"] == "일괄 경비율 장부발송 중"
-        return {"status": "session_active", "current_step": "일괄 경비율 장부발송 완료 발송=1건 패스=1건 실패=0건"}
-
-    monkeypatch.setattr(
-        "income33.agent.runner.preview_rate_based_bookkeeping_expected_tax_amounts",
-        fake_preview_rate_based_bookkeeping_expected_tax_amounts,
-    )
-    monkeypatch.setattr(
-        "income33.agent.runner.send_rate_based_bookkeeping_expected_tax_amounts",
-        fake_send_rate_based_bookkeeping_expected_tax_amounts,
-    )
-    runner, client = build_runner(
-        [
-            {
-                "id": 27,
-                "command": "preview_rate_based_bookkeeping_expected_tax_amounts",
-                "payload_json": json.dumps({"year": 2025, "size": 20}),
-            },
-            {
-                "id": 28,
-                "command": "send_rate_based_bookkeeping_expected_tax_amounts",
-                "payload_json": json.dumps({"year": 2025, "size": 20}),
-            },
-        ]
-    )
-
-    runner.run_once()
-
-    assert calls == [
-        {"command": "preview", "bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
-        {"command": "send", "bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
-    ]
-    assert client.completed == [
-        {"command_id": 27, "status": "done", "error_message": None},
-        {"command_id": 28, "status": "done", "error_message": None},
-    ]
-    assert client.heartbeats[-1]["current_step"] == "일괄 경비율 장부발송 완료 발송=1건 패스=1건 실패=0건"
-
-
 def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
     def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
         assert client.heartbeats[-1]["bot_status"] == "session_active"
@@ -347,7 +204,6 @@ def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
         return {"status": "session_active", "current_step": "계산발송 완료"}
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [{"id": 19, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
     )
@@ -362,7 +218,6 @@ def test_runner_reports_failure_step_when_send_command_fails(monkeypatch):
         raise RuntimeError("send api failed")
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [{"id": 20, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
     )
@@ -389,7 +244,6 @@ def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monke
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, _ = build_runner(
         [
             {
@@ -425,7 +279,6 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -448,7 +301,6 @@ def test_runner_repeats_send_after_five_idle_minutes(monkeypatch):
         {"bot_id": "sender-01", "payload": {"year": 2025, "size": 20}},
     ]
     assert client.completed == [{"command_id": 15, "status": "done", "error_message": None}]
-    assert refresh_calls == [{"bot_id": "sender-01", "payload": {"year": 2025, "size": 20, "force": True}}]
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2 / 다음발송 300초 후"
 
 
@@ -471,7 +323,6 @@ def test_runner_ignores_false_auth_probe_while_repeat_send_is_scheduled(monkeypa
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -514,7 +365,6 @@ def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monk
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -555,7 +405,6 @@ def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypa
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -598,7 +447,6 @@ def test_runner_keeps_repeating_after_leftover_assignment(monkeypatch):
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -637,7 +485,6 @@ def test_runner_cancels_repeated_send_when_operator_queues_control_command(monke
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {"id": 16, "command": "send_expected_tax_amounts", "payload_json": "{}"},
