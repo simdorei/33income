@@ -567,6 +567,7 @@ def _taxdoc_filter_search_url(
         "noticeTypeFilter": "ALL",
         "extraSurveyTypeFilter": "ALL",
         "expectedTaxAmountTypeFilter": "ALL",
+        "freeReasonTypeFilter": "ALL",
         "refundStatusFilter": "ALL",
         "taxDocServiceCodeTypeFilter": "C0",
         "year": year,
