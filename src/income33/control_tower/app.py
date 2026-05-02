@@ -98,8 +98,8 @@ def _taxdoc_id_list_send_form(bot_id: str) -> str:
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
         "placeholder='taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 계산발송을 진행할까요?')\">"
-        "ID목록 계산발송</button>"
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 경비율 장부 계산발송(개별 순차)을 진행할까요?')\">"
+        "ID목록 경비율 장부발송</button>"
         "</form>"
     )
 
@@ -428,7 +428,7 @@ def create_app(
         try:
             app.state.service.queue_bot_command(
                 bot_id=bot_id,
-                command="send_expected_tax_amounts",
+                command="send_rate_based_bookkeeping_expected_tax_amounts",
                 payload={"tax_doc_ids": tax_doc_ids},
             )
         except KeyError as exc:

@@ -412,7 +412,7 @@ def test_dashboard_can_queue_send_expected_tax_amounts_from_taxdoc_id_list(tmp_p
     assert polled.status_code == 200
     commands = polled.json()["commands"]
     assert len(commands) == 1
-    assert commands[0]["command"] == "send_expected_tax_amounts"
+    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
     assert '"tax_doc_ids": [1360165, 1360166, 1360167]' in commands[0]["payload_json"]
 
 

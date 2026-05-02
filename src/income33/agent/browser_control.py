@@ -945,20 +945,18 @@ def send_expected_tax_amounts(
         )
 
     if trace_enabled:
-        sample_rows = list(verify_preview.get("sample_rows") or [])
+        preview_ids = [int(tax_doc_id) for tax_doc_id in list(verify_preview.get("tax_doc_ids") or [])]
+        preview_id_set = set(preview_ids)
         requested_set = set(requested_tax_doc_ids)
-        matched_requested_rows = []
-        for row in sample_rows:
-            tax_doc_id = row.get("taxDocId")
-            if isinstance(tax_doc_id, int) and tax_doc_id in requested_set:
-                matched_requested_rows.append(row)
+        requested_found_ids = [tax_doc_id for tax_doc_id in requested_tax_doc_ids if tax_doc_id in preview_id_set]
+        requested_missing_ids = [tax_doc_id for tax_doc_id in requested_tax_doc_ids if tax_doc_id not in preview_id_set]
         logger.info(
-            "send_expected_tax_amounts_trace_verify bot_id=%s verify_count=%s remaining_sent_ids=%s verify_sample_rows=%s matched_requested_rows=%s",
+            "send_expected_tax_amounts_trace_verify bot_id=%s verify_count=%s remaining_sent_ids=%s requested_found_ids=%s requested_missing_ids=%s",
             bot_id,
             verify_count,
             remaining_sent_ids,
-            sample_rows,
-            matched_requested_rows,
+            requested_found_ids,
+            requested_missing_ids,
         )
 
     logger.info(
