@@ -865,6 +865,24 @@ def send_expected_tax_amounts(
         )
         send_json = send_response.get("json") or {}
         result_data = send_json.get("data") or {}
+        response_error = send_json.get("error")
+        trace_enabled = bool(payload.get("trace_response")) or _env_bool("INCOME33_SEND_TRACE_RESPONSE", False)
+        if trace_enabled:
+            logger.info(
+                "send_expected_tax_amounts_trace bot_id=%s request_body=%s response_status=%s response_ok=%s response_json_ok=%s response_data_result=%s response_error=%s",
+                bot_id,
+                request_body,
+                send_response.get("status"),
+                send_response.get("ok"),
+                send_json.get("ok"),
+                result_data.get("result"),
+                response_error,
+            )
+            logger.info(
+                "send_expected_tax_amounts_trace_response_json bot_id=%s response_json=%s",
+                bot_id,
+                send_json,
+            )
         if not send_response.get("ok") or not send_json.get("ok") or result_data.get("result") is not True:
             raise RuntimeError(f"expected tax amount send failed status={send_response.get('status')}")
         return {
