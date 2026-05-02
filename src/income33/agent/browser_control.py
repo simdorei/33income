@@ -879,11 +879,15 @@ def send_expected_tax_amounts(
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
+    sent_ids = [int(x) for x in list(result.get("tax_doc_ids") or [])]
     logger.info(
-        "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s",
+        "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s requested_count=%s requested_ids=%s sent_ids=%s",
         bot_id,
         result.get("sent_count"),
         result.get("status_code"),
+        len(requested_tax_doc_ids),
+        requested_tax_doc_ids,
+        sent_ids,
     )
     return result
 

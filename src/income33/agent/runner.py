@@ -442,9 +442,12 @@ class AgentRunner:
         )
         self._send_current_state_heartbeat()
         self.logger.info(
-            "send_repeat_done bot_id=%s next_interval=%s",
+            "send_repeat_done bot_id=%s next_interval=%s sent_count=%s status_code=%s result_tax_doc_ids=%s",
             self.agent.bot_id,
             interval,
+            result.get("sent_count"),
+            result.get("status_code"),
+            list(result.get("tax_doc_ids") or []),
         )
 
     def _handle_start(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
