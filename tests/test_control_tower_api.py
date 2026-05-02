@@ -166,6 +166,69 @@ def test_api_can_queue_send_expected_tax_amounts_command(tmp_path):
     assert '"tax_doc_ids": [1360165]' in commands[0]["payload_json"]
 
 
+def test_api_can_queue_command_with_envelope_payload(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={
+            "command": "send_expected_tax_amounts",
+            "payload": {
+                "command": "send_expected_tax_amounts",
+                "target": {"bot_id": "sender-01", "bot_role": "sender"},
+                "payload": {"tax_doc_ids": [1360165, 1360166]},
+                "meta": {"request_id": "ct-test-001"},
+                "retry": {"interval_sec": 120, "max_attempts": 4},
+            },
+        },
+    )
+    assert queued.status_code == 200
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert '"tax_doc_ids": [1360165, 1360166]' in commands[0]["payload_json"]
+    assert '"_meta": {"request_id": "ct-test-001"}' in commands[0]["payload_json"]
+    assert '"_retry": {"interval_sec": 120, "max_attempts": 4}' in commands[0]["payload_json"]
+
+
+def test_api_rejects_envelope_target_role_mismatch(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={
+            "command": "send_expected_tax_amounts",
+            "payload": {
+                "command": "send_expected_tax_amounts",
+                "target": {"bot_id": "sender-01", "bot_role": "reporter"},
+                "payload": {"tax_doc_ids": [1360165]},
+            },
+        },
+    )
+    assert queued.status_code == 400
+    assert "target bot_role does not match bot type" in queued.text
+
+
+def test_api_rejects_envelope_target_bot_id_mismatch(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={
+            "command": "send_expected_tax_amounts",
+            "payload": {
+                "command": "send_expected_tax_amounts",
+                "target": {"bot_id": "sender-02", "bot_role": "sender"},
+                "payload": {"tax_doc_ids": [1360165]},
+            },
+        },
+    )
+    assert queued.status_code == 400
+    assert "target bot_id does not match bot id" in queued.text
+
+
 def test_api_can_queue_preview_send_targets_command(tmp_path):
     client = build_client(tmp_path)
 

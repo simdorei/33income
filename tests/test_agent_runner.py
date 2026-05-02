@@ -27,14 +27,14 @@ class FakeClient:
         return self.completed[-1]
 
 
-def build_runner(commands=None, monotonic_fn=None):
+def build_runner(commands=None, monotonic_fn=None, bot_id="sender-01", bot_type="sender"):
     agent = AgentConfig(
         pc_id="pc-01",
         hostname="WIN-PC-01",
         ip_address="127.0.0.1",
         control_tower_url="http://127.0.0.1:8330",
-        bot_id="sender-01",
-        bot_type="sender",
+        bot_id=bot_id,
+        bot_type=bot_type,
         heartbeat_interval_seconds=30,
     )
     client = FakeClient(commands=commands)
@@ -209,6 +209,21 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_rejects_sender_only_command_on_reporter(monkeypatch):
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    runner, client = build_runner(
+        [{"id": 99, "command": "send_expected_tax_amounts", "payload_json": "{}"}],
+        bot_id="reporter-01",
+        bot_type="reporter",
+    )
+
+    runner.run_once()
+
+    assert client.completed == [{"command_id": 99, "status": "failed", "error_message": "SENDER_ONLY_COMMAND: send_expected_tax_amounts"}]
+    assert client.heartbeats[-1]["bot_status"] == "manual_required"
+    assert "SENDER_ONLY_COMMAND" in client.heartbeats[-1]["current_step"]
+
+
 def test_runner_handles_send_bookkeeping_expected_tax_amount_command(monkeypatch):
     calls = []
 
@@ -355,6 +370,29 @@ def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
     runner.run_once()
 
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 / 다음발송 300초 후"
+
+
+def test_runner_uses_retry_policy_interval_and_max_attempts_from_payload(monkeypatch):
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        return {"status": "session_active", "current_step": "계산발송 완료", "tax_doc_ids": [1360165]}
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    runner, client = build_runner(
+        [
+            {
+                "id": 119,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "_retry": {"interval_sec": 120, "max_attempts": 5}}),
+            }
+        ]
+    )
+
+    runner.run_once()
+
+    assert client.heartbeats[-1]["current_step"] == "계산발송 완료 / 다음발송 120초 후"
+    assert runner._repeat_send_payload["_repeat_interval_sec"] == 120
+    assert runner._repeat_send_payload["_repeat_max_attempts"] == 5
 
 
 def test_runner_reports_failure_step_when_send_command_fails(monkeypatch):

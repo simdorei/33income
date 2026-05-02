@@ -8,6 +8,15 @@ from income33.db import Database
 logger = logging.getLogger("income33.control_tower.service")
 
 
+_SENDER_ONLY_COMMANDS = {
+    "send_expected_tax_amounts",
+    "send_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amount",
+    "preview_rate_based_bookkeeping_expected_tax_amounts",
+    "send_rate_based_bookkeeping_expected_tax_amounts",
+}
+
+
 def _sanitize_command_for_response(command: dict[str, Any]) -> dict[str, Any]:
     if command.get("command") != "submit_auth_code":
         return command
@@ -45,6 +54,42 @@ class ControlTowerService:
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.db.list_recent_commands(limit=limit)
 
+    def _normalize_command_payload(
+        self,
+        *,
+        bot: dict[str, Any],
+        command: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+
+        envelope_payload = payload
+        envelope_target = None
+        if isinstance(payload.get("payload"), dict):
+            envelope_payload = payload["payload"]
+            envelope_target = payload.get("target")
+            envelope_command = payload.get("command")
+            if envelope_command and envelope_command != command:
+                raise ValueError("envelope command does not match command path")
+
+        if isinstance(envelope_target, dict):
+            target_bot_id = envelope_target.get("bot_id")
+            if target_bot_id and target_bot_id != bot.get("bot_id"):
+                raise ValueError("target bot_id does not match bot id")
+            target_role = envelope_target.get("bot_role")
+            if target_role and target_role != bot.get("bot_type"):
+                raise ValueError("target bot_role does not match bot type")
+
+        normalized = dict(envelope_payload)
+        if isinstance(payload.get("meta"), dict):
+            normalized["_meta"] = payload["meta"]
+        if isinstance(payload.get("retry"), dict):
+            normalized["_retry"] = payload["retry"]
+        return normalized
+
     def queue_bot_command(
         self,
         bot_id: str,
@@ -54,17 +99,8 @@ class ControlTowerService:
         bot = self.db.get_bot(bot_id)
         if bot is None:
             raise KeyError(f"bot not found: {bot_id}")
-        if (
-            command
-            in {
-                "send_expected_tax_amounts",
-                "send_bookkeeping_expected_tax_amount",
-                "send_rate_based_bookkeeping_expected_tax_amount",
-                "preview_rate_based_bookkeeping_expected_tax_amounts",
-                "send_rate_based_bookkeeping_expected_tax_amounts",
-            }
-            and bot.get("bot_type") != "sender"
-        ):
+        payload = self._normalize_command_payload(bot=bot, command=command, payload=payload)
+        if command in _SENDER_ONLY_COMMANDS and bot.get("bot_type") != "sender":
             raise ValueError("expected tax amount commands are only allowed for sender bots")
 
         queued = self.db.enqueue_command(

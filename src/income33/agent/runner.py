@@ -50,6 +50,14 @@ _LOGIN_STATE_PROBE_STATUSES = {
     "session_active",
 }
 
+_SENDER_ONLY_COMMANDS = {
+    "send_expected_tax_amounts",
+    "send_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amount",
+    "preview_rate_based_bookkeeping_expected_tax_amounts",
+    "send_rate_based_bookkeeping_expected_tax_amounts",
+}
+
 
 def _resolve_send_repeat_interval_seconds() -> int:
     raw_value = os.getenv("INCOME33_SEND_REPEAT_INTERVAL_SECONDS", "300")
@@ -94,7 +102,7 @@ class AgentRunner:
         self._repeat_send_attempt_counts: dict[int, int] = {}
 
     @staticmethod
-    def _command_payload(command: dict[str, Any]) -> dict[str, Any]:
+    def _command_payload_json(command: dict[str, Any]) -> dict[str, Any]:
         raw_payload = command.get("payload_json")
         if not raw_payload:
             return {}
@@ -105,6 +113,23 @@ class AgentRunner:
         except (TypeError, json.JSONDecodeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _command_payload(cls, command: dict[str, Any]) -> dict[str, Any]:
+        parsed = cls._command_payload_json(command)
+        envelope_payload = parsed.get("payload")
+        if isinstance(envelope_payload, dict):
+            return envelope_payload
+        return parsed
+
+    @classmethod
+    def _command_retry_policy(cls, command: dict[str, Any]) -> dict[str, Any]:
+        parsed = cls._command_payload_json(command)
+        retry = parsed.get("retry")
+        if isinstance(retry, dict):
+            return retry
+        payload_retry = parsed.get("_retry")
+        return payload_retry if isinstance(payload_retry, dict) else {}
 
     def _set_bot_state(self, status: str, step: str | None = None) -> None:
         previous_status = self.bot.status
@@ -226,15 +251,40 @@ class AgentRunner:
             interval,
         )
 
-    def _schedule_repeated_send(self, payload: dict[str, Any]) -> None:
-        interval = _resolve_send_repeat_interval_seconds()
+    @staticmethod
+    def _resolve_repeat_interval_seconds(retry_policy: dict[str, Any]) -> int:
+        raw_interval = retry_policy.get("interval_sec")
+        try:
+            interval = int(raw_interval)
+            if interval >= 1:
+                return interval
+        except (TypeError, ValueError):
+            pass
+        return _resolve_send_repeat_interval_seconds()
+
+    @staticmethod
+    def _resolve_repeat_max_attempts(retry_policy: dict[str, Any]) -> int:
+        raw_attempts = retry_policy.get("max_attempts")
+        try:
+            attempts = int(raw_attempts)
+            if attempts >= 1:
+                return attempts
+        except (TypeError, ValueError):
+            pass
+        return 3
+
+    def _schedule_repeated_send(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        interval = self._resolve_repeat_interval_seconds(retry_policy)
         self._repeat_send_payload = dict(payload)
+        self._repeat_send_payload["_repeat_interval_sec"] = interval
+        self._repeat_send_payload["_repeat_max_attempts"] = self._resolve_repeat_max_attempts(retry_policy)
         self._next_repeated_send_monotonic = self._monotonic() + interval
         self._repeat_send_attempt_counts = {}
         self.logger.info(
-            "send_repeat_scheduled bot_id=%s interval=%s",
+            "send_repeat_scheduled bot_id=%s interval=%s max_attempts=%s",
             self.agent.bot_id,
             interval,
+            self._repeat_send_payload["_repeat_max_attempts"],
         )
 
     def _cancel_repeated_send(self) -> None:
@@ -249,6 +299,7 @@ class AgentRunner:
     def _track_repeat_send_attempts(
         attempt_counts: dict[int, int],
         tax_doc_ids: list[int],
+        max_attempts: int,
     ) -> list[int]:
         fallback_tax_doc_ids: list[int] = []
         for raw_tax_doc_id in tax_doc_ids:
@@ -259,7 +310,7 @@ class AgentRunner:
                 continue
             next_attempt = attempt_counts.get(tax_doc_id, 0) + 1
             attempt_counts[tax_doc_id] = next_attempt
-            if next_attempt >= 3:
+            if next_attempt >= max_attempts:
                 fallback_tax_doc_ids.append(tax_doc_id)
         return fallback_tax_doc_ids
 
@@ -274,11 +325,13 @@ class AgentRunner:
             return
 
         payload = dict(self._repeat_send_payload)
-        interval = _resolve_send_repeat_interval_seconds()
+        interval = int(payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
+        max_attempts = int(payload.get("_repeat_max_attempts") or 3)
+        send_payload = {k: v for k, v in payload.items() if not str(k).startswith("_repeat_")}
         try:
             self._set_bot_state("session_active", "계산발송 반복 새로고침 중")
             self._send_current_state_heartbeat()
-            refresh_payload = dict(payload)
+            refresh_payload = dict(send_payload)
             refresh_payload["force"] = True
             refresh_page(
                 bot_id=self.agent.bot_id,
@@ -289,7 +342,7 @@ class AgentRunner:
             self._send_current_state_heartbeat()
             result = send_expected_tax_amounts(
                 bot_id=self.agent.bot_id,
-                payload=payload,
+                payload=send_payload,
                 logger=logging.getLogger("income33.agent.browser_control"),
             )
         except Exception as exc:
@@ -302,13 +355,14 @@ class AgentRunner:
         fallback_tax_doc_ids = self._track_repeat_send_attempts(
             self._repeat_send_attempt_counts,
             list(result.get("tax_doc_ids") or []),
+            max_attempts=max_attempts,
         )
         if fallback_tax_doc_ids:
             try:
                 assign_result = assign_taxdocs_to_current_accountant(
                     bot_id=self.agent.bot_id,
                     tax_doc_ids=fallback_tax_doc_ids,
-                    payload=payload,
+                    payload=send_payload,
                     logger=logging.getLogger("income33.agent.browser_control"),
                 )
             except Exception as exc:
@@ -339,6 +393,7 @@ class AgentRunner:
         command_name = command["command"]
         command_id = command["id"]
         payload = self._command_payload(command)
+        retry_policy = self._command_retry_policy(command)
         self.logger.info(
             "command_received command_id=%s command=%s bot_id=%s",
             command_id,
@@ -349,6 +404,8 @@ class AgentRunner:
             self._cancel_repeated_send()
 
         try:
+            if self.agent.bot_type != "sender" and command_name in _SENDER_ONLY_COMMANDS:
+                raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
             if command_name == "start":
                 self.bot.start()
                 self._set_bot_state(self.bot.status)
@@ -425,14 +482,17 @@ class AgentRunner:
                 result_status = str(result.get("status") or "session_active")
                 result_step = str(result.get("current_step") or "계산발송 완료")
                 if payload.get("repeat") is True or not _payload_has_explicit_tax_doc_ids(payload):
-                    self._schedule_repeated_send(payload)
+                    self._schedule_repeated_send(payload, retry_policy)
+                    repeat_max_attempts = int(self._repeat_send_payload.get("_repeat_max_attempts") or 3)
                     self._track_repeat_send_attempts(
                         self._repeat_send_attempt_counts,
                         list(result.get("tax_doc_ids") or []),
+                        max_attempts=repeat_max_attempts,
                     )
+                    repeat_interval = int(self._repeat_send_payload.get("_repeat_interval_sec") or _resolve_send_repeat_interval_seconds())
                     result_step = self._repeat_send_wait_step(
                         result_step,
-                        remaining_seconds=_resolve_send_repeat_interval_seconds(),
+                        remaining_seconds=repeat_interval,
                     )
                 self._set_bot_state(result_status, result_step)
             elif command_name == "send_bookkeeping_expected_tax_amount":
