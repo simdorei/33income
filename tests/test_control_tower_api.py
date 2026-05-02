@@ -52,6 +52,9 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" in root.text
     assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/send-expected-tax-amounts-list" in root.text
+    assert "name='tax_doc_ids'" in root.text
+    assert "<textarea" in root.text
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" in root.text
     assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" in root.text
     assert "return confirm" in root.text
@@ -237,6 +240,78 @@ def test_dashboard_can_queue_rate_based_bookkeeping_command(tmp_path):
     assert len(commands) == 1
     assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amount"
     assert '"tax_doc_id": 1348568' in commands[0]["payload_json"]
+
+
+def test_dashboard_can_queue_send_expected_tax_amounts_from_taxdoc_id_list(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        data={"tax_doc_ids": "1360165, 1360166\n1360165 1360167"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_expected_tax_amounts"
+    assert '"tax_doc_ids": [1360165, 1360166, 1360167]' in commands[0]["payload_json"]
+
+
+def test_dashboard_rejects_invalid_taxdoc_id_list(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        data={"tax_doc_ids": "1360165,abc"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert "invalid tax_doc_id" in response.text
+
+
+def test_dashboard_rejects_non_positive_taxdoc_id_list(tmp_path):
+    client = build_client(tmp_path)
+
+    for raw_value in ("0", "-1", "1.2"):
+        response = client.post(
+            "/ui/bots/sender-01/send-expected-tax-amounts-list",
+            data={"tax_doc_ids": raw_value},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 400
+        assert "invalid tax_doc_id" in response.text
+
+
+def test_dashboard_rejects_too_many_taxdoc_ids(tmp_path):
+    client = build_client(tmp_path)
+
+    many_ids = ",".join(str(1000000 + i) for i in range(501))
+    response = client.post(
+        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        data={"tax_doc_ids": many_ids},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert "exceeds max 500" in response.text
+
+
+def test_dashboard_rejects_empty_taxdoc_id_list(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        data={"tax_doc_ids": "   "},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert "tax_doc_ids is required" in response.text
 
 
 def test_dashboard_can_queue_auth_code_command(tmp_path):

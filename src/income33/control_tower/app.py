@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from html import escape
 from typing import Any
 
@@ -102,6 +103,20 @@ def _rate_based_bookkeeping_form(bot_id: str) -> str:
     )
 
 
+def _taxdoc_id_list_send_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/send-expected-tax-amounts-list' "
+        "class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 계산발송을 진행할까요?')\">"
+        "ID목록 계산발송</button>"
+        "</form>"
+    )
+
+
 def _bot_actions_html(bot_id: str) -> str:
     buttons = [
         _command_button(bot_id, "start", "시작"),
@@ -123,6 +138,7 @@ def _bot_actions_html(bot_id: str) -> str:
             )
         )
         buttons.append(_rate_based_bookkeeping_form(bot_id))
+        buttons.append(_taxdoc_id_list_send_form(bot_id))
         buttons.append(
             _command_button(
                 bot_id,
@@ -239,6 +255,7 @@ def _render_dashboard_html(payload: dict[str, Any]) -> str:
           button {{ margin: 2px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }}
           .inline-form {{ display: inline; margin-left: 6px; }}
           .inline-form input {{ width: 130px; margin-right: 4px; padding: 4px 6px; }}
+          .inline-form textarea {{ width: 210px; margin-right: 4px; padding: 4px 6px; vertical-align: middle; }}
           button.danger {{ color: #b91c1c; }}
           button.login {{ background: #eef2ff; border-color: #818cf8; }}
           button.login-done {{ background: #ecfdf5; border-color: #34d399; }}
@@ -391,6 +408,47 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             logger.warning("queue_rate_based_bookkeeping_rejected bot_id=%s reason=%s", bot_id, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/bots/{bot_id}/send-expected-tax-amounts-list")
+    async def queue_send_expected_tax_amounts_list(bot_id: str, request: Request) -> RedirectResponse:
+        from urllib.parse import parse_qs
+
+        raw_body = (await request.body()).decode("utf-8", errors="ignore")
+        raw_tax_doc_ids = parse_qs(raw_body).get("tax_doc_ids", [""])[0].strip()
+        if not raw_tax_doc_ids:
+            raise HTTPException(status_code=400, detail="tax_doc_ids is required")
+
+        tokens = [token for token in re.split(r"[\s,]+", raw_tax_doc_ids) if token]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="tax_doc_ids is required")
+        if len(tokens) > 500:
+            raise HTTPException(status_code=400, detail="tax_doc_ids exceeds max 500")
+
+        tax_doc_ids: list[int] = []
+        for token in tokens:
+            try:
+                tax_doc_id = int(token)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"invalid tax_doc_id: {token}") from exc
+            if tax_doc_id <= 0:
+                raise HTTPException(status_code=400, detail=f"invalid tax_doc_id: {token}")
+            tax_doc_ids.append(tax_doc_id)
+
+        tax_doc_ids = list(dict.fromkeys(tax_doc_ids))
+
+        try:
+            app.state.service.queue_bot_command(
+                bot_id=bot_id,
+                command="send_expected_tax_amounts",
+                payload={"tax_doc_ids": tax_doc_ids},
+            )
+        except KeyError as exc:
+            logger.warning("queue_send_expected_tax_amounts_list_not_found bot_id=%s", bot_id)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            logger.warning("queue_send_expected_tax_amounts_list_rejected bot_id=%s reason=%s", bot_id, exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 
