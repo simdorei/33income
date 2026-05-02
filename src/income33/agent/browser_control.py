@@ -659,6 +659,7 @@ def preview_expected_tax_send_targets(
 ) -> dict[str, Any]:
     logger = logger or logging.getLogger("income33.agent.browser_control")
     payload = payload or {}
+    trace_enabled = bool(payload.get("trace_response")) or _env_bool("INCOME33_SEND_TRACE_RESPONSE", False)
     year = _resolve_taxdoc_year(payload)
     size = _resolve_taxdoc_page_size(payload)
     page_index = max(0, int(payload.get("page", 0)))
@@ -683,6 +684,15 @@ def preview_expected_tax_send_targets(
             "accept": "application/json, text/plain, */*",
             "x-web-path": web_path,
         }
+        if trace_enabled:
+            logger.info(
+                "preview_expected_tax_send_targets_trace_request bot_id=%s year=%s page=%s size=%s payload=%s",
+                bot_id,
+                year,
+                page_index,
+                size,
+                payload,
+            )
         office_response = _browser_fetch_json(
             page,
             url=office_url,
@@ -710,6 +720,20 @@ def preview_expected_tax_send_targets(
                 headers={**common_headers, "x-host": "GIT"},
             )
             list_json = list_response.get("json") or {}
+            if trace_enabled:
+                data = list_json.get("data") or {}
+                content = list(data.get("content") or [])
+                logger.info(
+                    "preview_expected_tax_send_targets_trace_page bot_id=%s page=%s status=%s ok=%s json_ok=%s total=%s rows=%s sample_rows=%s",
+                    bot_id,
+                    target_page_index,
+                    list_response.get("status"),
+                    list_response.get("ok"),
+                    list_json.get("ok"),
+                    data.get("totalElements"),
+                    len(content),
+                    content[:3],
+                )
             if not list_response.get("ok") or not list_json.get("ok"):
                 raise RuntimeError(f"taxdoc list failed page={target_page_index + 1} status={list_response.get('status')}")
             return list_json.get("data") or {}
@@ -728,12 +752,16 @@ def preview_expected_tax_send_targets(
         tax_doc_ids: list[int] = []
         page_data_cache = {page_index: first_data}
 
+        sample_rows: list[dict[str, Any]] = []
         for target_page_index in pages_to_scan:
             data = page_data_cache.get(target_page_index)
             if data is None:
                 data = _fetch_taxdoc_page(target_page_index)
                 page_data_cache[target_page_index] = data
             content = data.get("content") or []
+            if len(sample_rows) < 10:
+                remaining = 10 - len(sample_rows)
+                sample_rows.extend(list(content)[:remaining])
             tax_doc_ids.extend(int(row["taxDocId"]) for row in content if row.get("taxDocId") is not None)
             if not total_elements:
                 total_elements = int(data.get("totalElements") or len(tax_doc_ids))
@@ -768,6 +796,7 @@ def preview_expected_tax_send_targets(
             "total_pages": total_pages,
             "count": len(tax_doc_ids),
             "tax_doc_ids": tax_doc_ids,
+            "sample_rows": sample_rows,
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
@@ -847,6 +876,7 @@ def send_expected_tax_amounts(
     web_path = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/tasks/git")
     send_url = f"{api_base_url}/api/tax/v1/taxdocs/expected-tax-amount/send"
     request_body = {"taxDocIdSet": tax_doc_ids}
+    trace_enabled = bool(payload.get("trace_response")) or _env_bool("INCOME33_SEND_TRACE_RESPONSE", False)
     headers = {
         "accept": "application/json, text/plain, */*",
         "x-host": "GIT",
@@ -866,7 +896,6 @@ def send_expected_tax_amounts(
         send_json = send_response.get("json") or {}
         result_data = send_json.get("data") or {}
         response_error = send_json.get("error")
-        trace_enabled = bool(payload.get("trace_response")) or _env_bool("INCOME33_SEND_TRACE_RESPONSE", False)
         if trace_enabled:
             logger.info(
                 "send_expected_tax_amounts_trace bot_id=%s request_body=%s response_status=%s response_ok=%s response_json_ok=%s response_data_result=%s response_error=%s",
@@ -901,6 +930,7 @@ def send_expected_tax_amounts(
 
     remaining_sent_ids: list[int] = []
     verify_count: int | None = None
+    verify_preview: dict[str, Any] = {}
     try:
         verify_preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
         preview_ids = [int(tax_doc_id) for tax_doc_id in list(verify_preview.get("tax_doc_ids") or [])]
@@ -912,6 +942,23 @@ def send_expected_tax_amounts(
             "send_expected_tax_amounts_verify_preview_failed bot_id=%s error=%s",
             bot_id,
             verify_exc,
+        )
+
+    if trace_enabled:
+        sample_rows = list(verify_preview.get("sample_rows") or [])
+        requested_set = set(requested_tax_doc_ids)
+        matched_requested_rows = []
+        for row in sample_rows:
+            tax_doc_id = row.get("taxDocId")
+            if isinstance(tax_doc_id, int) and tax_doc_id in requested_set:
+                matched_requested_rows.append(row)
+        logger.info(
+            "send_expected_tax_amounts_trace_verify bot_id=%s verify_count=%s remaining_sent_ids=%s verify_sample_rows=%s matched_requested_rows=%s",
+            bot_id,
+            verify_count,
+            remaining_sent_ids,
+            sample_rows,
+            matched_requested_rows,
         )
 
     logger.info(
