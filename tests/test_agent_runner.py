@@ -720,6 +720,38 @@ def test_runner_ignores_false_auth_probe_while_repeat_send_is_scheduled(monkeypa
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 #2 / 다음발송 300초 후"
 
 
+def test_runner_repeat_send_continues_in_login_auth_required_state(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0, 1300.0])
+    send_calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": f"계산발송 완료 #{len(send_calls)}"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    stub_repeat_force_refresh(monkeypatch)
+    runner, _ = build_runner(
+        [
+            {
+                "id": 185,
+                "command": "send_expected_tax_amounts",
+                "payload_json": json.dumps({"year": 2025, "repeat": True, "_retry": {"interval_sec": 300}}),
+            }
+        ],
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()  # initial
+    runner.bot.status = "login_auth_required"
+    runner.run_once()  # due -> should still retry
+
+    assert len(send_calls) == 2
+
+
 def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monkeypatch):
     monotonic_points = iter([1000.0, 1300.0, 1300.0])
     send_calls = []
@@ -1014,6 +1046,31 @@ def test_runner_keepalive_refreshes_when_due(monkeypatch):
     assert calls == [{"bot_id": "sender-01", "payload": {}}]
     assert client.heartbeats[0]["bot_status"] == "session_active"
     assert client.heartbeats[0]["current_step"] == "session_refresh"
+
+
+def test_runner_keepalive_refreshes_during_repeat_even_when_auth_required(monkeypatch):
+    monotonic_points = iter([1000.0, 1001.0])
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    calls = []
+
+    def fake_refresh_page(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_refresh", "url": "https://x"}
+
+    monkeypatch.setenv("INCOME33_REFRESH_ENABLED", "1")
+    monkeypatch.setenv("INCOME33_REFRESH_INTERVAL_SECONDS", "600")
+    monkeypatch.setattr("income33.agent.runner.refresh_page", fake_refresh_page)
+
+    runner, _ = build_runner(monotonic_fn=fake_monotonic)
+    runner._repeat_send_payload = {"year": 2025}
+    runner.bot.status = "login_auth_required"
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {}}]
 
 
 def test_non_running_statuses_do_not_advance_steps():

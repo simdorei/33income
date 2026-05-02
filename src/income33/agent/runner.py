@@ -59,6 +59,12 @@ _LOGIN_STATE_PROBE_STATUSES = {
     "session_active",
 }
 
+_REPEAT_SEND_CONTINUABLE_STATUSES = {
+    "session_active",
+    "login_auth_required",
+    "manual_required",
+}
+
 
 def _build_bot_runner(agent: AgentConfig):
     if agent.bot_type == "reporter":
@@ -262,7 +268,11 @@ class AgentRunner:
         if not is_refresh_enabled():
             return
         if self.bot.status in _KEEPALIVE_BLOCKING_STATUSES:
-            return
+            if not (
+                self._repeat_send_payload is not None
+                and self.bot.status in {"login_auth_required", "manual_required"}
+            ):
+                return
 
         interval = resolve_refresh_interval_seconds()
         now = self._monotonic()
@@ -340,7 +350,7 @@ class AgentRunner:
     def _run_repeated_send_if_due(self) -> None:
         if self._repeat_send_payload is None or self._next_repeated_send_monotonic is None:
             return
-        if self.bot.status != "session_active":
+        if self.bot.status not in _REPEAT_SEND_CONTINUABLE_STATUSES:
             self._cancel_repeated_send()
             return
         now = self._monotonic()
