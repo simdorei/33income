@@ -622,17 +622,29 @@ def _browser_fetch_json(
             request.headers['content-type'] = request.headers['content-type'] || 'application/json';
             request.body = JSON.stringify(jsonBody);
           }
-          const response = await fetch(url, request);
-          const text = await response.text();
-          let json = null;
-          try { json = text ? JSON.parse(text) : null; } catch (e) {}
-          return {
-            ok: response.ok,
-            status: response.status,
-            url: response.url,
-            json,
-            text: json ? null : text.slice(0, 500),
-          };
+          try {
+            const response = await fetch(url, request);
+            const text = await response.text();
+            let json = null;
+            try { json = text ? JSON.parse(text) : null; } catch (e) {}
+            return {
+              ok: response.ok,
+              status: response.status,
+              url: response.url,
+              json,
+              text: json ? null : text.slice(0, 500),
+              fetch_error: null,
+            };
+          } catch (err) {
+            return {
+              ok: false,
+              status: 0,
+              url,
+              json: null,
+              text: null,
+              fetch_error: String(err),
+            };
+          }
         }
         """,
         {"url": url, "method": method, "headers": headers or {}, "jsonBody": json_body},
@@ -1117,7 +1129,10 @@ def _fetch_required_json_data(page: Any, *, url: str, headers: dict[str, str], l
     response = _browser_fetch_json(page, url=url, headers=headers)
     response_json = response.get("json") or {}
     if not response.get("ok") or not response_json.get("ok"):
-        raise RuntimeError(f"{label} failed status={response.get('status')}")
+        fetch_error = response.get("fetch_error")
+        if fetch_error:
+            raise RuntimeError(f"{label} failed fetch_error={fetch_error} url={url}")
+        raise RuntimeError(f"{label} failed status={response.get('status')} url={url}")
     return response_json.get("data") or {}
 
 

@@ -387,8 +387,8 @@ def create_app(
         try:
             app.state.service.queue_bot_command(
                 bot_id=bot_id,
-                command="send_rate_based_bookkeeping_expected_tax_amount",
-                payload={"tax_doc_id": tax_doc_id},
+                command="send_rate_based_bookkeeping_expected_tax_amounts",
+                payload={"tax_doc_ids": [tax_doc_id]},
             )
         except KeyError as exc:
             logger.warning("queue_rate_based_bookkeeping_not_found bot_id=%s", bot_id)

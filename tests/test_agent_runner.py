@@ -296,18 +296,18 @@ def test_runner_handles_send_bookkeeping_expected_tax_amount_command(monkeypatch
 def test_runner_handles_send_rate_based_bookkeeping_expected_tax_amount_command(monkeypatch):
     calls = []
 
-    def fake_send_rate_based_bookkeeping_expected_tax_amount(*, bot_id, payload, logger):
+    def fake_send_rate_based_bookkeeping_expected_tax_amounts(*, bot_id, payload, logger):
         calls.append({"bot_id": bot_id, "payload": payload})
         assert client.heartbeats[-1]["current_step"] == "경비율 장부 계산발송 중"
         return {
             "status": "session_active",
-            "current_step": "경비율 계산 패스 taxDocId=1348568 customType=다 status=200",
-            "skipped": True,
+            "current_step": "일괄 경비율 장부발송 완료 발송=0건 패스=1건 실패=0건",
+            "skipped_count": 1,
         }
 
     monkeypatch.setattr(
-        "income33.agent.runner.send_rate_based_bookkeeping_expected_tax_amount",
-        fake_send_rate_based_bookkeeping_expected_tax_amount,
+        "income33.agent.runner.send_rate_based_bookkeeping_expected_tax_amounts",
+        fake_send_rate_based_bookkeeping_expected_tax_amounts,
     )
     runner, client = build_runner(
         [
@@ -321,10 +321,10 @@ def test_runner_handles_send_rate_based_bookkeeping_expected_tax_amount_command(
 
     runner.run_once()
 
-    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_id": 1348568}}]
+    assert calls == [{"bot_id": "sender-01", "payload": {"tax_doc_id": 1348568, "tax_doc_ids": [1348568]}}]
     assert client.completed == [{"command_id": 26, "status": "done", "error_message": None}]
     assert runner.bot.status == "session_active"
-    assert client.heartbeats[-1]["current_step"] == "경비율 계산 패스 taxDocId=1348568 customType=다 status=200"
+    assert client.heartbeats[-1]["current_step"] == "일괄 경비율 장부발송 완료 발송=0건 패스=1건 실패=0건"
 
 
 def test_runner_handles_bulk_rate_based_bookkeeping_commands(monkeypatch):

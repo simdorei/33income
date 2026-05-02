@@ -476,12 +476,17 @@ class AgentRunner:
         )
 
     def _handle_send_rate_based_bookkeeping_expected_tax_amount(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        # Deprecated single-item command path: normalize into list-based orchestration.
         self._cancel_repeated_send()
         self._set_bot_state("session_active", "경비율 장부 계산발송 중")
         self._send_current_state_heartbeat()
-        result = send_rate_based_bookkeeping_expected_tax_amount(
+        normalized_payload = dict(payload)
+        tax_doc_id = normalized_payload.get("tax_doc_id") or normalized_payload.get("taxDocId")
+        if tax_doc_id is not None and not normalized_payload.get("tax_doc_ids"):
+            normalized_payload["tax_doc_ids"] = [int(tax_doc_id)]
+        result = send_rate_based_bookkeeping_expected_tax_amounts(
             bot_id=self.agent.bot_id,
-            payload=payload,
+            payload=normalized_payload,
             logger=logging.getLogger("income33.agent.browser_control"),
         )
         self._set_bot_state(

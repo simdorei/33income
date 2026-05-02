@@ -394,8 +394,8 @@ def test_dashboard_can_queue_rate_based_bookkeeping_command(tmp_path):
     assert polled.status_code == 200
     commands = polled.json()["commands"]
     assert len(commands) == 1
-    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amount"
-    assert '"tax_doc_id": 1348568' in commands[0]["payload_json"]
+    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
+    assert '"tax_doc_ids": [1348568]' in commands[0]["payload_json"]
 
 
 def test_dashboard_can_queue_send_expected_tax_amounts_from_taxdoc_id_list(tmp_path):
