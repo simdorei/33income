@@ -114,12 +114,23 @@ def test_send_expected_tax_amounts_posts_selected_tax_doc_ids(monkeypatch):
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
-        assert url.endswith("/api/tax/v1/taxdocs/expected-tax-amount/send")
-        assert method == "POST"
-        assert headers["x-host"] == "GIT"
-        assert headers["x-web-path"] == "https://newta.3o3.co.kr/tasks/git"
-        assert json_body == {"taxDocIdSet": [1360165, 1360211]}
-        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+        if url.endswith("/api/tax/v1/taxdocs/expected-tax-amount/send"):
+            assert method == "POST"
+            assert headers["x-host"] == "GIT"
+            assert headers["x-web-path"] == "https://newta.3o3.co.kr/tasks/git"
+            assert json_body == {"taxDocIdSet": [1360165, 1360211]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+        assert "/api/tax/v1/taxdocs/filter-search" in url
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {"content": [], "totalElements": 0, "totalPages": 1},
+            },
+        }
 
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
     monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
@@ -129,7 +140,7 @@ def test_send_expected_tax_amounts_posts_selected_tax_doc_ids(monkeypatch):
         payload={"tax_doc_ids": [1360165, 1360211]},
     )
 
-    assert len(calls) == 1
+    assert any(call["url"].endswith("/api/tax/v1/taxdocs/expected-tax-amount/send") for call in calls)
     assert result["status"] == "session_active"
     assert result["sent_count"] == 2
     assert result["tax_doc_ids"] == [1360165, 1360211]
@@ -169,7 +180,10 @@ def test_send_expected_tax_amounts_can_collect_targets_then_post(monkeypatch):
 
     result = browser_control.send_expected_tax_amounts(bot_id="sender-01", payload={"year": 2025, "size": 20})
 
-    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+    send_calls = [call for call in calls if call["url"].endswith("/api/tax/v1/taxdocs/expected-tax-amount/send")]
+    assert len(send_calls) == 1
+    assert send_calls[0]["method"] == "POST"
+    assert send_calls[0]["json_body"] == {"taxDocIdSet": [11, 12]}
     assert result["sent_count"] == 2
     assert result["tax_doc_ids"] == [11, 12]
 

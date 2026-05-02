@@ -880,14 +880,32 @@ def send_expected_tax_amounts(
 
     result = _run_in_cdp_session(bot_id, payload, _run)
     sent_ids = [int(x) for x in list(result.get("tax_doc_ids") or [])]
+
+    remaining_sent_ids: list[int] = []
+    verify_count: int | None = None
+    try:
+        verify_preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
+        preview_ids = [int(tax_doc_id) for tax_doc_id in list(verify_preview.get("tax_doc_ids") or [])]
+        preview_id_set = set(preview_ids)
+        remaining_sent_ids = [tax_doc_id for tax_doc_id in sent_ids if tax_doc_id in preview_id_set]
+        verify_count = int(verify_preview.get("count") or len(preview_ids))
+    except Exception as verify_exc:
+        logger.warning(
+            "send_expected_tax_amounts_verify_preview_failed bot_id=%s error=%s",
+            bot_id,
+            verify_exc,
+        )
+
     logger.info(
-        "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s requested_count=%s requested_ids=%s sent_ids=%s",
+        "send_expected_tax_amounts_done bot_id=%s count=%s status_code=%s requested_count=%s requested_ids=%s sent_ids=%s verify_count=%s remaining_sent_ids=%s",
         bot_id,
         result.get("sent_count"),
         result.get("status_code"),
         len(requested_tax_doc_ids),
         requested_tax_doc_ids,
         sent_ids,
+        verify_count,
+        remaining_sent_ids,
     )
     return result
 
