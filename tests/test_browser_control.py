@@ -411,6 +411,64 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
     assert [failure["tax_doc_id"] for failure in result["failures"]] == [2002, 2003, 2004]
 
 
+def test_send_simple_expense_rate_expected_tax_amounts_logs_failure_reasons(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        return {
+            "ok": True,
+            "status": "session_active",
+            "count": 3,
+            "tax_doc_ids": [4001, 4002, 4003],
+        }
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        if url.endswith("/api/tax/v1/taxdocs/4001/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith("/api/tax/v1/taxdocs/4002/summary?isMasking=true"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": False, "data": None, "error": {"message": "요약 조회 실패"}},
+            }
+        if url.endswith("/api/tax/v1/taxdocs/4003/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": [{"id": 7}]}}}
+        if url.endswith("/api/tax/v1/taxdocs/4001/expected-tax-amount/send"):
+            return {
+                "ok": False,
+                "status": 400,
+                "json": {"ok": False, "data": {"result": False}, "error": {"message": "발송 제한"}},
+                "text": "발송 제한",
+            }
+
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "preview_expected_tax_send_targets", fake_preview_expected_tax_send_targets)
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_simple_expense_rate_expected_tax_amounts(bot_id="sender-01", payload={})
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert result["failed_count"] == 2
+    assert result["skipped_count"] == 1
+    assert (
+        "send_simple_expense_rate_expected_tax_amounts_failure "
+        "bot_id=sender-01 tax_doc_id=4002 stage=summary reason=summary_json_non_ok status=200 detail=요약 조회 실패"
+    ) in joined
+    assert (
+        "send_simple_expense_rate_expected_tax_amounts_failure "
+        "bot_id=sender-01 tax_doc_id=4001 stage=send reason=send_failed status=400 detail=발송 제한"
+    ) in joined
+    assert (
+        "send_simple_expense_rate_expected_tax_amounts_skipped "
+        "bot_id=sender-01 tax_doc_id=4003 reason=tax_ray_exists tax_ray_count=1"
+    ) in joined
+
+
 def test_send_simple_expense_rate_collects_all_pages_then_summaries_then_sorted_sends(monkeypatch):
     calls = []
 

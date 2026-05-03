@@ -1766,6 +1766,38 @@ def send_expected_tax_amounts(
     return result
 
 
+def _compact_log_detail(value: Any, *, limit: int = 400) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, dict):
+        for key in ("message", "reason", "detail", "description", "code"):
+            detail = _compact_log_detail(value.get(key), limit=limit)
+            if detail:
+                return detail
+        for key in ("error", "data", "body", "response"):
+            detail = _compact_log_detail(value.get(key), limit=limit)
+            if detail:
+                return detail
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    elif isinstance(value, list):
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+
+    compacted = " ".join(text.split())
+    if len(compacted) > limit:
+        return f"{compacted[:limit]}...(truncated)"
+    return compacted
+
+
+def _simple_expense_failure_detail(failure: dict[str, Any]) -> str:
+    for key in ("fetch_error", "error", "response_text"):
+        detail = _compact_log_detail(failure.get(key))
+        if detail:
+            return detail
+    return ""
+
+
 def send_simple_expense_rate_expected_tax_amounts(
     *,
     bot_id: str,
@@ -1995,6 +2027,24 @@ def send_simple_expense_rate_expected_tax_amounts(
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
+    for failure in list(result.get("failures") or []):
+        logger.warning(
+            "send_simple_expense_rate_expected_tax_amounts_failure bot_id=%s tax_doc_id=%s stage=%s reason=%s status=%s detail=%s",
+            bot_id,
+            failure.get("tax_doc_id"),
+            failure.get("stage"),
+            failure.get("reason"),
+            failure.get("status"),
+            _simple_expense_failure_detail(failure),
+        )
+    for skipped_item in list(result.get("skipped") or []):
+        logger.info(
+            "send_simple_expense_rate_expected_tax_amounts_skipped bot_id=%s tax_doc_id=%s reason=%s tax_ray_count=%s",
+            bot_id,
+            skipped_item.get("tax_doc_id"),
+            skipped_item.get("reason"),
+            skipped_item.get("tax_ray_count"),
+        )
     logger.info(
         "send_simple_expense_rate_expected_tax_amounts_done bot_id=%s attempted=%s sent=%s skipped=%s failed=%s",
         bot_id,
