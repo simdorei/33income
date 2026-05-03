@@ -789,10 +789,15 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and
                     "error": None,
                 },
             }
-        assert url.endswith("/api/tax/v1/taxdocs/1348568/custom-type")
-        assert method == "PUT"
+        if url.endswith("/api/tax/v1/taxdocs/1348568/custom-type"):
+            assert method == "PUT"
+            assert headers["x-host"] == "GIT"
+            assert json_body == {"customType": "다"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True, "error": None}}
+        assert url.endswith("/api/tax/v1/taxdocs/1348568/memo")
+        assert method == "POST"
         assert headers["x-host"] == "GIT"
-        assert json_body == {"customType": "다"}
+        assert json_body == {"memo": "경비율 산출 총 필요경비: 300657111원"}
         return {"ok": True, "status": 200, "json": {"ok": True, "data": True, "error": None}}
 
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
@@ -803,11 +808,12 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and
         payload={"tax_doc_id": 1348568},
     )
 
-    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "PUT"]
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "PUT", "POST"]
     assert result["skipped"] is True
     assert result["reason"] == "eligible_expense_exceeds_rate_cap"
     assert result["custom_type"] == "다"
     assert result["custom_type_status_code"] == 200
+    assert result["memo_status_code"] == 200
     assert result["rate_cap_amount"] == 296817287
     assert result["eligible_expense_amount"] == 385348975
     assert result["current_step"] == "경비율 계산 패스 taxDocId=1348568 customType=다 status=200"
@@ -819,6 +825,81 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and
     assert '"custom_type": "다"' in skip_log_text
     assert "232-17-02578" not in skip_log_text
     assert "385348975" not in skip_log_text
+
+
+def test_send_rate_based_bookkeeping_expected_tax_amount_marks_da_when_rate_total_below_newta_base(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/1348249/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "summary": {
+                            "sum": {"수입금액": 10_000_000},
+                            "itemList": [
+                                {
+                                    "사업자번호": "123-45-67890",
+                                    "업종코드": "515060",
+                                    "수입금액": 10_000_000,
+                                }
+                            ],
+                        }
+                    },
+                    "error": None,
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/year-end-document/1348249"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {}, "error": None}}
+        if url.endswith("/api/tax/v1/gitax/expenses/1348249/expenses-summary"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"list": []}, "error": None}}
+        if "/api/tax/v1/taxdocs/1348249/expected-tax-amount/calculation/bookkeeping" in url:
+            assert method == "GET"
+            query = parse_qs(urlparse(url).query)
+            assert query["additionalExpenseAmount"] == ["0"]
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 9_000_000}, "error": None},
+            }
+        if url.endswith("/api/tax/v1/taxdocs/1348249/custom-type"):
+            assert method == "PUT"
+            assert headers["x-host"] == "GIT"
+            assert json_body == {"customType": "다"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True, "error": None}}
+        assert url.endswith("/api/tax/v1/taxdocs/1348249/memo")
+        assert method == "POST"
+        assert headers["x-host"] == "GIT"
+        assert json_body == {"memo": "경비율 산출 총 필요경비: 8820000원"}
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": True, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_rate_based_bookkeeping_expected_tax_amount(
+        bot_id="sender-01",
+        payload={"tax_doc_id": 1348249},
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "GET", "PUT", "POST"]
+    assert result["skipped"] is True
+    assert result["reason"] == "rate_total_below_newta_base_expense"
+    assert result["custom_type"] == "다"
+    assert result["custom_type_status_code"] == 200
+    assert result["memo_status_code"] == 200
+    assert result["total_business_expense_amount"] == 8_820_000
+    assert result["base_business_expense_amount"] == 9_000_000
+    assert result["additional_expense_amount"] == -180_000
+    assert result["current_step"] == "경비율 계산 패스 taxDocId=1348249 customType=다 status=200"
 
 
 def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_processes_each_taxdoc(

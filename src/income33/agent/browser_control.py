@@ -2264,12 +2264,55 @@ def _write_bookkeeping_expense_rate_skip_log(entry: dict[str, Any]) -> None:
             "reason",
             "custom_type",
             "custom_type_status_code",
+            "memo_status_code",
             "current_step",
         )
         if key in entry
     }
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _rate_based_total_expense_for_memo(entry: dict[str, Any]) -> int:
+    raw_total = entry.get("total_business_expense_amount")
+    if raw_total is not None and not isinstance(raw_total, bool):
+        return int(raw_total)
+
+    raw_rate_cap = entry.get("rate_cap_amount")
+    if raw_rate_cap is None or isinstance(raw_rate_cap, bool):
+        raise RuntimeError("missing rate-based total expense amount for memo")
+
+    amount = int(raw_rate_cap)
+    if entry.get("business_number_mode") == "mixed":
+        zero_basis = int(entry.get("zero_rate_basis_expense_amount") or 0)
+        amount += _floor_money(Decimal(zero_basis) * Decimal("0.95"))
+    return amount
+
+
+def _rate_based_total_expense_memo(amount: int) -> str:
+    return f"경비율 산출 총 필요경비: {int(amount)}원"
+
+
+def _post_taxdoc_memo(
+    *,
+    page: Any,
+    api_base_url: str,
+    tax_doc_id: int,
+    headers: dict[str, str],
+    memo: str,
+) -> dict[str, Any]:
+    memo_url = f"{api_base_url}/api/tax/v1/taxdocs/{tax_doc_id}/memo"
+    response = _browser_fetch_json(
+        page,
+        url=memo_url,
+        method="POST",
+        headers=headers,
+        json_body={"memo": memo},
+    )
+    response_json = response.get("json") or {}
+    if not response.get("ok") or not response_json.get("ok"):
+        raise RuntimeError(f"taxdoc memo update failed status={response.get('status')}")
+    return response
 
 
 def _put_custom_type_for_taxdoc(
@@ -2409,6 +2452,11 @@ def send_bookkeeping_expected_tax_amount(
         or os.getenv("INCOME33_BOOKKEEPING_SEND_WEB_PATH")
         or "https://newta.3o3.co.kr/git/year-end-document"
     )
+    summary_web_path = str(
+        payload.get("summary_web_path")
+        or os.getenv("INCOME33_SUMMARY_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/summary"
+    )
     calculation_headers = {
         "accept": "application/json, text/plain, */*",
         "x-host": "GIT",
@@ -2419,6 +2467,15 @@ def send_bookkeeping_expected_tax_amount(
         "x-host": "GIT",
         "x-web-path": send_web_path,
     }
+    summary_headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": summary_web_path,
+    }
+    mark_da_on_negative_additional_expense = bool(
+        payload.get("mark_custom_type_da_on_negative_additional_expense")
+        or payload.get("markCustomTypeDaOnNegativeAdditionalExpense")
+    )
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
@@ -2442,9 +2499,45 @@ def send_bookkeeping_expected_tax_amount(
         )
         additional_expense_amount = total_business_expense_amount - base_business_expense_amount
         if additional_expense_amount < 0:
-            raise ValueError(
-                "total_business_expense_amount must be greater than or equal to base business expense"
+            if not mark_da_on_negative_additional_expense:
+                raise ValueError(
+                    "total_business_expense_amount must be greater than or equal to base business expense"
+                )
+            custom_response = _put_custom_type_da_for_taxdoc(
+                page=page,
+                api_base_url=api_base_url,
+                tax_doc_id=tax_doc_id,
+                headers=summary_headers,
             )
+            memo_total_expense_amount = int(total_business_expense_amount)
+            memo_response = _post_taxdoc_memo(
+                page=page,
+                api_base_url=api_base_url,
+                tax_doc_id=tax_doc_id,
+                headers=summary_headers,
+                memo=_rate_based_total_expense_memo(memo_total_expense_amount),
+            )
+            current_step = f"경비율 계산 패스 taxDocId={tax_doc_id} customType=다 status={custom_response.get('status')}"
+            result = {
+                "ok": True,
+                "dry_run": False,
+                "skipped": True,
+                "reason": "rate_total_below_newta_base_expense",
+                "status": "session_active",
+                "current_step": current_step,
+                "debug_port": debug_port,
+                "tax_doc_id": tax_doc_id,
+                "submit_account_type": submit_account_type,
+                "base_business_expense_amount": base_business_expense_amount,
+                "total_business_expense_amount": total_business_expense_amount,
+                "additional_expense_amount": additional_expense_amount,
+                "custom_type": "다",
+                "custom_type_status_code": custom_response.get("status"),
+                "memo_status_code": memo_response.get("status"),
+                "memo_total_business_expense_amount": memo_total_expense_amount,
+            }
+            _write_bookkeeping_expense_rate_skip_log(result)
+            return result
 
         final_calculation_url = _bookkeeping_calculation_url(
             api_base_url=api_base_url,
@@ -2518,6 +2611,15 @@ def send_bookkeeping_expected_tax_amount(
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
+    if result.get("skipped"):
+        logger.warning(
+            "bookkeeping_expense_rate_skipped tax_doc_id=%s reason=%s custom_type_status=%s memo_status=%s",
+            result.get("tax_doc_id"),
+            result.get("reason"),
+            result.get("custom_type_status_code"),
+            result.get("memo_status_code"),
+        )
+        return result
     logger.info(
         "send_bookkeeping_expected_tax_amount_done bot_id=%s tax_doc_id=%s additional_expense=%s status_code=%s",
         bot_id,
@@ -2622,24 +2724,36 @@ def send_rate_based_bookkeeping_expected_tax_amount(
             }
         )
         if calculation.get("skipped"):
+            summary_headers = _headers(summary_web_path)
             custom_response = _put_custom_type_da_for_taxdoc(
                 page=page,
                 api_base_url=api_base_url,
                 tax_doc_id=tax_doc_id,
-                headers=_headers(summary_web_path),
+                headers=summary_headers,
+            )
+            memo_total_expense_amount = _rate_based_total_expense_for_memo(calculation)
+            memo_response = _post_taxdoc_memo(
+                page=page,
+                api_base_url=api_base_url,
+                tax_doc_id=tax_doc_id,
+                headers=summary_headers,
+                memo=_rate_based_total_expense_memo(memo_total_expense_amount),
             )
             calculation["custom_type"] = "다"
             calculation["custom_type_status_code"] = custom_response.get("status")
+            calculation["memo_status_code"] = memo_response.get("status")
+            calculation["memo_total_business_expense_amount"] = memo_total_expense_amount
             calculation["current_step"] = (
                 f"경비율 계산 패스 taxDocId={tax_doc_id} "
                 f"customType=다 status={custom_response.get('status')}"
             )
             _write_bookkeeping_expense_rate_skip_log(calculation)
             logger.warning(
-                "bookkeeping_expense_rate_skipped tax_doc_id=%s reason=%s custom_type_status=%s",
+                "bookkeeping_expense_rate_skipped tax_doc_id=%s reason=%s custom_type_status=%s memo_status=%s",
                 tax_doc_id,
                 calculation.get("reason"),
                 custom_response.get("status"),
+                memo_response.get("status"),
             )
         else:
             calculation["current_step"] = (
@@ -2656,6 +2770,7 @@ def send_rate_based_bookkeeping_expected_tax_amount(
     send_payload["tax_doc_id"] = tax_doc_id
     send_payload["submit_account_type"] = submit_account_type
     send_payload["total_business_expense_amount"] = int(rate_result["total_business_expense_amount"])
+    send_payload["mark_custom_type_da_on_negative_additional_expense"] = True
     send_result = send_bookkeeping_expected_tax_amount(
         bot_id=bot_id,
         payload=send_payload,
