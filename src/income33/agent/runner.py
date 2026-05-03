@@ -21,7 +21,9 @@ from income33.agent.browser_control import (
     send_expected_tax_amounts,
     send_rate_based_bookkeeping_expected_tax_amount,
     send_rate_based_bookkeeping_expected_tax_amounts,
+    send_simple_expense_rate_expected_tax_amounts,
     submit_auth_code,
+    submit_tax_reports,
 )
 from income33.agent.client import ControlTowerClient
 from income33.agent.login import open_login_window
@@ -31,6 +33,7 @@ from income33.config import AgentConfig, load_config
 from income33.control_tower.service import (
     command_retry_policy,
     payload_has_explicit_tax_doc_ids,
+    reporter_only_commands,
     resolve_retry_interval_seconds,
     resolve_retry_max_attempts,
     sender_only_commands,
@@ -94,10 +97,12 @@ class AgentRunner:
         self._repeat_send_failure_count: int = 0
         self._failure_step_messages: dict[str, str] = {
             "send_expected_tax_amounts": "계산발송 실패",
+            "send_simple_expense_rate_expected_tax_amounts": "단순경비율 목록발송 실패",
             "send_bookkeeping_expected_tax_amount": "단건 계산발송 실패",
             "send_rate_based_bookkeeping_expected_tax_amount": "경비율 장부 계산발송 실패",
             "preview_rate_based_bookkeeping_expected_tax_amounts": "일괄세션 확인 실패",
             "send_rate_based_bookkeeping_expected_tax_amounts": "일괄 경비율 장부발송 실패",
+            "submit_tax_reports": "국세신고 응답수집 실패",
         }
 
     @staticmethod
@@ -561,6 +566,24 @@ class AgentRunner:
             )
         self._set_bot_state(result_status, result_step)
 
+    def _handle_send_simple_expense_rate_expected_tax_amounts(
+        self,
+        payload: dict[str, Any],
+        retry_policy: dict[str, Any],
+    ) -> None:
+        self._cancel_repeated_send()
+        self._set_bot_state("session_active", "단순경비율 목록발송 중")
+        self._send_current_state_heartbeat()
+        result = send_simple_expense_rate_expected_tax_amounts(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "단순경비율 목록발송 완료"),
+        )
+
     def _handle_send_bookkeeping_expected_tax_amount(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
         self._cancel_repeated_send()
         self._set_bot_state("session_active", "단건 계산발송 중")
@@ -622,6 +645,20 @@ class AgentRunner:
             str(result.get("current_step") or "일괄 경비율 장부발송 완료"),
         )
 
+    def _handle_submit_tax_reports(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._set_bot_state("session_active", "국세신고 응답수집 중")
+        self._send_current_state_heartbeat()
+        normalized_payload = self._normalize_send_tax_doc_payload(payload)
+        result = submit_tax_reports(
+            bot_id=self.agent.bot_id,
+            payload=normalized_payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            str(result.get("current_step") or "국세신고 응답수집 완료"),
+        )
+
     def _handle_login_done(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
         self._set_bot_state("idle", "idle")
         self.logger.info("login_done_marked bot_id=%s", self.agent.bot_id)
@@ -640,10 +677,12 @@ class AgentRunner:
             "refresh_page": self._handle_refresh_page,
             "preview_send_targets": self._handle_preview_send_targets,
             "send_expected_tax_amounts": self._handle_send_expected_tax_amounts,
+            "send_simple_expense_rate_expected_tax_amounts": self._handle_send_simple_expense_rate_expected_tax_amounts,
             "send_bookkeeping_expected_tax_amount": self._handle_send_bookkeeping_expected_tax_amount,
             "send_rate_based_bookkeeping_expected_tax_amount": self._handle_send_rate_based_bookkeeping_expected_tax_amount,
             "preview_rate_based_bookkeeping_expected_tax_amounts": self._handle_preview_rate_based_bookkeeping_expected_tax_amounts,
             "send_rate_based_bookkeeping_expected_tax_amounts": self._handle_send_rate_based_bookkeeping_expected_tax_amounts,
+            "submit_tax_reports": self._handle_submit_tax_reports,
             "login_done": self._handle_login_done,
             "status": self._handle_status,
         }
@@ -679,6 +718,8 @@ class AgentRunner:
             retry_policy = command_retry_policy(parsed_payload)
             if self.agent.bot_type != "sender" and command_name in sender_only_commands():
                 raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
+            if self.agent.bot_type != "reporter" and command_name in reporter_only_commands():
+                raise ValueError(f"REPORTER_ONLY_COMMAND: {command_name}")
             self._dispatch_command(command_name, payload, retry_policy)
         except Exception as exc:
             self._apply_failure_state_for_command(command_name, exc)

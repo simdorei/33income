@@ -91,6 +91,20 @@ def _taxdoc_id_list_rate_based_bookkeeping_form(bot_id: str) -> str:
     )
 
 
+def _taxdoc_id_list_tax_report_submit_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-submit-list' "
+        "class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='신고 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 국세신고를 순차 실행하고 응답 원문을 로그로 남길까요?')\">"
+        "국세신고 응답로그</button>"
+        "</form>"
+    )
+
+
 def _bot_actions_html(bot_id: str) -> str:
     buttons = [
         _command_button(bot_id, "start", "시작"),
@@ -110,7 +124,18 @@ def _bot_actions_html(bot_id: str) -> str:
                 "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?",
             )
         )
+        buttons.append(
+            _command_button(
+                bot_id,
+                "send_simple_expense_rate_expected_tax_amounts",
+                "단순경비율 목록발송",
+                "send",
+                "리뷰대기+단순경비율 목록 taxDocId를 조회한 뒤 순차 계산발송을 진행할까요?",
+            )
+        )
         buttons.append(_taxdoc_id_list_rate_based_bookkeeping_form(bot_id))
+    if bot_id.startswith("reporter-"):
+        buttons.append(_taxdoc_id_list_tax_report_submit_form(bot_id))
     buttons.extend(
         [
             _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
@@ -393,6 +418,15 @@ def create_app(
             request=request,
             command="send_rate_based_bookkeeping_expected_tax_amounts",
             log_label="queue_rate_based_bookkeeping_send_list",
+        )
+
+    @app.post("/ui/bots/{bot_id}/tax-report-submit-list")
+    async def queue_tax_report_submit_list(bot_id: str, request: Request) -> RedirectResponse:
+        return await _queue_tax_doc_id_list_command(
+            bot_id=bot_id,
+            request=request,
+            command="submit_tax_reports",
+            log_label="queue_tax_report_submit_list",
         )
 
     @app.get("/api/agents/{pc_id}/commands/poll")

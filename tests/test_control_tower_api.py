@@ -33,12 +33,15 @@ def test_command_policy_centralizes_dashboard_allowlist_and_sender_only_guardrai
     allowed = dashboard_allowed_commands()
     assert "open_login" in allowed
     assert "send_expected_tax_amounts" in allowed
+    assert "send_simple_expense_rate_expected_tax_amounts" in allowed
+    assert "submit_tax_reports" in allowed
     assert "preview_send_targets" not in allowed
     assert "preview_rate_based_bookkeeping_expected_tax_amounts" not in allowed
     assert "send_rate_based_bookkeeping_expected_tax_amounts" not in allowed
     assert "submit_auth_code" not in allowed
 
     assert get_command_policy("send_expected_tax_amounts").sender_only is True
+    assert get_command_policy("submit_tax_reports").reporter_only is True
     assert get_command_policy("open_login").sender_only is False
 
 
@@ -142,6 +145,7 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "목록조회 테스트" not in root.text
     assert "계산발송</button>" in root.text
     assert "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?" in root.text
+    assert "단순경비율 목록발송" in root.text
     assert "ID목록 경비율 장부발송" in root.text
     assert "일괄세션 확인" not in root.text
     assert "일괄 계산발송 시작" not in root.text
@@ -150,15 +154,19 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" not in root.text
     assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/commands/send_simple_expense_rate_expected_tax_amounts" in root.text
     assert "/ui/bots/sender-01/send-expected-tax-amounts-list" not in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send-list" in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send'" not in root.text
-    assert root.text.count("name='tax_doc_ids'") == 9
+    assert root.text.count("name='tax_doc_ids'") == 18
     assert "name='tax_doc_id'" not in root.text
     assert "<textarea" in root.text
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "return confirm" in root.text
+    assert "국세신고 응답로그" in root.text
+    assert "/ui/bots/reporter-01/tax-report-submit-list" in root.text
+    assert "/ui/bots/sender-01/tax-report-submit-list" not in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
     assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
 
@@ -168,6 +176,7 @@ def test_api_rejects_expected_tax_amount_commands_for_reporter_bot(tmp_path):
 
     for command in (
         "send_expected_tax_amounts",
+        "send_simple_expense_rate_expected_tax_amounts",
         "send_bookkeeping_expected_tax_amount",
         "send_rate_based_bookkeeping_expected_tax_amount",
         "preview_rate_based_bookkeeping_expected_tax_amounts",
@@ -179,6 +188,31 @@ def test_api_rejects_expected_tax_amount_commands_for_reporter_bot(tmp_path):
         )
         assert queued.status_code == 400
         assert "only allowed for sender" in queued.text
+
+
+def test_api_can_queue_submit_tax_reports_for_reporter_bot_only(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/reporter-01/commands",
+        json={"command": "submit_tax_reports", "payload": {"tax_doc_ids": [1001, 1002]}},
+    )
+    assert queued.status_code == 200
+    assert queued.json()["status"] == "pending"
+
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "submit_tax_reports"
+    assert '"tax_doc_ids": [1001, 1002]' in commands[0]["payload_json"]
+
+    rejected = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "submit_tax_reports", "payload": {"tax_doc_ids": [1001]}},
+    )
+    assert rejected.status_code == 400
+    assert "only allowed for reporter" in rejected.text
 
 
 def test_api_can_queue_send_bookkeeping_expected_tax_amount_command(tmp_path):

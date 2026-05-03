@@ -14,6 +14,7 @@ logger = logging.getLogger("income33.control_tower.service")
 @dataclass(frozen=True)
 class CommandPolicy:
     sender_only: bool = False
+    reporter_only: bool = False
     dashboard_allowed: bool = False
     default_retry: dict[str, Any] | None = None
     preserves_repeat_schedule: bool = False
@@ -41,6 +42,10 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         preserves_repeat_schedule=True,
         repeat_schedule_enabled=True,
     ),
+    "send_simple_expense_rate_expected_tax_amounts": CommandPolicy(
+        sender_only=True,
+        dashboard_allowed=True,
+    ),
     "send_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
     "send_rate_based_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
     "preview_rate_based_bookkeeping_expected_tax_amounts": CommandPolicy(
@@ -51,6 +56,7 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         sender_only=True,
         default_retry={"interval_sec": 60, "max_attempts": 2},
     ),
+    "submit_tax_reports": CommandPolicy(reporter_only=True, dashboard_allowed=True),
 }
 
 if missing_policy_commands := set(COMMAND_TYPES) - set(_COMMAND_POLICIES):
@@ -77,6 +83,10 @@ def dashboard_allowed_commands() -> set[str]:
 
 def sender_only_commands() -> set[str]:
     return {command for command, policy in _COMMAND_POLICIES.items() if policy.sender_only}
+
+
+def reporter_only_commands() -> set[str]:
+    return {command for command, policy in _COMMAND_POLICIES.items() if policy.reporter_only}
 
 
 def should_cancel_repeated_send_before_command(command: str) -> bool:
@@ -264,6 +274,8 @@ class ControlTowerService:
         policy = get_command_policy(command)
         if policy.sender_only and bot.get("bot_type") != "sender":
             raise ValueError("expected tax amount commands are only allowed for sender bots")
+        if policy.reporter_only and bot.get("bot_type") != "reporter":
+            raise ValueError("tax report submit commands are only allowed for reporter bots")
 
         queued = self.db.enqueue_command(
             pc_id=bot["pc_id"],

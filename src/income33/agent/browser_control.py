@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import webbrowser
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -576,17 +577,21 @@ def _taxdoc_filter_search_url(
     year: int,
     page: int,
     size: int,
+    workflow_filter_set: str = "ASSIGN_WAITING",
+    tax_doc_custom_type_filter: str = "ALL",
+    apply_expense_rate_type_filter: str = "ALL",
+    direction: str = "DESC",
 ) -> str:
     params = {
         "officeId": office_id,
-        "workflowFilterSet": "ASSIGN_WAITING",
+        "workflowFilterSet": workflow_filter_set,
         "assignmentStatusFilter": "ALL",
-        "taxDocCustomTypeFilter": "ALL",
+        "taxDocCustomTypeFilter": tax_doc_custom_type_filter,
         "businessIncomeTypeFilter": "ALL",
         "freelancerIncomeAmountTypeFilter": "ALL",
         "reviewTypeFilter": "ALL",
         "submitGuideTypeFilter": "ALL",
-        "applyExpenseRateTypeFilter": "ALL",
+        "applyExpenseRateTypeFilter": apply_expense_rate_type_filter,
         "noticeTypeFilter": "ALL",
         "extraSurveyTypeFilter": "ALL",
         "expectedTaxAmountTypeFilter": "ALL",
@@ -595,7 +600,7 @@ def _taxdoc_filter_search_url(
         "taxDocServiceCodeTypeFilter": "C0",
         "year": year,
         "sort": "REVIEW_REQUEST_DATE_TIME",
-        "direction": "DESC",
+        "direction": direction,
         "page": page,
         "size": size,
     }
@@ -651,6 +656,333 @@ def _browser_fetch_json(
     )
 
 
+def _redact_sensitive_log_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if any(marker in key_text for marker in ("token", "password", "secret", "authorization", "auth_code")):
+                redacted[str(key)] = "[REDACTED]"
+            else:
+                redacted[str(key)] = _redact_sensitive_log_values(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_log_values(item) for item in value]
+    return value
+
+
+TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE = "tax_report_submit_responses.jsonl"
+TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE = "tax_report_submit_failures.txt"
+
+
+def _tax_report_submit_response_log_path() -> Path:
+    return resolve_log_dir() / TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
+
+
+def _tax_report_submit_failure_summary_log_path() -> Path:
+    return resolve_log_dir() / TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE
+
+
+def _write_tax_report_submit_response_log(entry: dict[str, Any]) -> Path:
+    log_path = _tax_report_submit_response_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                _redact_sensitive_log_values(entry),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    return log_path
+
+
+def _delete_tax_report_submit_response_logs_for_taxdoc(*, tax_doc_id: int) -> Path:
+    """Remove stale reporter response-log rows once a taxDoc reaches final completion."""
+    log_path = _tax_report_submit_response_log_path()
+    if not log_path.exists():
+        return log_path
+
+    kept_lines: list[str] = []
+    removed = False
+    for raw_line in log_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except json.JSONDecodeError:
+            kept_lines.append(raw_line)
+            continue
+        try:
+            entry_tax_doc_id = int(entry.get("tax_doc_id"))
+        except (TypeError, ValueError):
+            kept_lines.append(raw_line)
+            continue
+        if entry_tax_doc_id == int(tax_doc_id):
+            removed = True
+            continue
+        kept_lines.append(raw_line)
+
+    if removed:
+        if kept_lines:
+            log_path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+        else:
+            log_path.unlink(missing_ok=True)
+    return log_path
+
+
+def _redact_sensitive_summary_text(value: str) -> str:
+    redacted = re.sub(
+        r"(?i)\b(token|password|secret|authorization|auth_code)\b\s*[:=]\s*[^\s,|]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        value,
+    )
+    return redacted.replace("\n", " ").replace("\r", " ")[:500]
+
+
+def _report_failure_reason(response: dict[str, Any], response_json: Any) -> str:
+    if response.get("fetch_error"):
+        return _redact_sensitive_summary_text(f"fetch_error={response.get('fetch_error')}")
+
+    reason_parts: list[str] = []
+    if isinstance(response_json, dict):
+        error_value = response_json.get("error")
+        if isinstance(error_value, dict):
+            for key in ("message", "msg", "code", "errorCode"):
+                if error_value.get(key):
+                    reason_parts.append(str(error_value.get(key)))
+                    break
+        elif error_value:
+            reason_parts.append(str(error_value))
+        for key in ("message", "msg", "code", "errorCode"):
+            if response_json.get(key):
+                reason_parts.append(str(response_json.get(key)))
+                break
+    if response.get("text"):
+        reason_parts.append(str(response.get("text")))
+    if not reason_parts:
+        reason_parts.append("응답 ok=false 또는 status 비정상")
+    return _redact_sensitive_summary_text(" / ".join(reason_parts))
+
+
+def _write_tax_report_submit_failure_summary(entry: dict[str, Any]) -> Path:
+    log_path = _tax_report_submit_failure_summary_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    reason = _redact_sensitive_summary_text(str(entry.get("failure_reason") or ""))
+    custom_type = entry.get("custom_type") or "미설정"
+    line = (
+        f"{entry.get('created_at')} | "
+        f"taxDocId={entry.get('tax_doc_id')} | "
+        f"{entry.get('stage_label')} 실패 | "
+        f"status={entry.get('response_status')} | "
+        f"reason={reason} | "
+        f"customType={custom_type} | "
+        f"bot={entry.get('bot_id')} | "
+        f"run={entry.get('run_id')}"
+    )
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    return log_path
+
+
+def _delete_tax_report_submit_failure_summaries_for_taxdoc(*, tax_doc_id: int) -> Path:
+    log_path = _tax_report_submit_failure_summary_log_path()
+    if not log_path.exists():
+        return log_path
+    pattern = re.compile(rf"\btaxDocId={int(tax_doc_id)}\b")
+    kept_lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if not pattern.search(line)]
+    if kept_lines:
+        log_path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+    else:
+        log_path.unlink(missing_ok=True)
+    return log_path
+
+
+def _resolve_report_submit_url_template(payload: dict[str, Any], *, api_base_url: str) -> str:
+    template = (
+        payload.get("submit_url_template")
+        or payload.get("submitUrlTemplate")
+        or os.getenv("INCOME33_REPORT_SUBMIT_URL_TEMPLATE")
+    )
+    if template:
+        template_text = str(template).strip()
+    else:
+        path_template = (
+            payload.get("submit_path_template")
+            or payload.get("submitPathTemplate")
+            or os.getenv("INCOME33_REPORT_SUBMIT_PATH_TEMPLATE")
+        )
+        if not path_template:
+            raise ValueError(
+                "report submit url template is required; set submit_url_template, submit_path_template, "
+                "INCOME33_REPORT_SUBMIT_URL_TEMPLATE, or INCOME33_REPORT_SUBMIT_PATH_TEMPLATE"
+            )
+        template_text = f"{api_base_url}/{str(path_template).lstrip('/')}"
+
+    if "{tax_doc_id}" not in template_text and "{taxDocId}" not in template_text:
+        raise ValueError("report submit url template must include {tax_doc_id} or {taxDocId}")
+    return template_text
+
+
+def _resolve_optional_report_url_template(
+    payload: dict[str, Any],
+    *,
+    api_base_url: str,
+    url_keys: tuple[str, ...],
+    path_keys: tuple[str, ...],
+    url_env_names: tuple[str, ...],
+    path_env_names: tuple[str, ...],
+) -> str | None:
+    template: Any = None
+    for key in url_keys:
+        if payload.get(key):
+            template = payload.get(key)
+            break
+    if template is None:
+        for env_name in url_env_names:
+            if os.getenv(env_name):
+                template = os.getenv(env_name)
+                break
+    if template is not None:
+        template_text = str(template).strip()
+    else:
+        path_template: Any = None
+        for key in path_keys:
+            if payload.get(key):
+                path_template = payload.get(key)
+                break
+        if path_template is None:
+            for env_name in path_env_names:
+                if os.getenv(env_name):
+                    path_template = os.getenv(env_name)
+                    break
+        if not path_template:
+            return None
+        template_text = f"{api_base_url}/{str(path_template).lstrip('/')}"
+
+    if "{tax_doc_id}" not in template_text and "{taxDocId}" not in template_text:
+        raise ValueError("report submit url template must include {tax_doc_id} or {taxDocId}")
+    return template_text
+
+
+def _resolve_report_stage_method(payload: dict[str, Any], *, stage: str, fallback: str) -> str:
+    camel_stage = "".join(part.capitalize() if index else part for index, part in enumerate(stage.split("_")))
+    for key in (f"{stage}_method", f"{camel_stage}Method"):
+        if payload.get(key):
+            method = str(payload.get(key)).strip().upper()
+            break
+    else:
+        method = fallback
+    if method not in {"GET", "POST", "PUT", "PATCH"}:
+        raise ValueError(f"{stage} method must be GET, POST, PUT, or PATCH")
+    return method
+
+
+def _resolve_report_failure_custom_type(payload: dict[str, Any]) -> str | None:
+    for key in (
+        "failure_custom_type",
+        "failureCustomType",
+        "report_failure_custom_type",
+        "reportFailureCustomType",
+    ):
+        if key in payload:
+            raw_value = payload.get(key)
+            break
+    else:
+        raw_value = os.getenv("INCOME33_REPORT_FAILURE_CUSTOM_TYPE")
+    if raw_value is None or isinstance(raw_value, bool):
+        return None
+    custom_type = str(raw_value).strip()
+    return custom_type or None
+
+
+def _format_tax_doc_id_template(template: str, *, tax_doc_id: int) -> str:
+    normalized_template = template.replace("{taxDocId}", "{tax_doc_id}")
+    return normalized_template.format(tax_doc_id=tax_doc_id)
+
+
+def _render_tax_doc_id_template_value(value: Any, *, tax_doc_id: int) -> Any:
+    if isinstance(value, str):
+        if value in {"{tax_doc_id}", "{taxDocId}"}:
+            return tax_doc_id
+        return value.replace("{tax_doc_id}", str(tax_doc_id)).replace("{taxDocId}", str(tax_doc_id))
+    if isinstance(value, list):
+        return [_render_tax_doc_id_template_value(item, tax_doc_id=tax_doc_id) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _render_tax_doc_id_template_value(item, tax_doc_id=tax_doc_id)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _tax_report_request_body(payload: dict[str, Any], *, tax_doc_id: int) -> dict[str, Any] | None:
+    if bool(payload.get("omit_request_body")):
+        return None
+    if "request_body" in payload:
+        template = payload.get("request_body")
+    elif "requestBody" in payload:
+        template = payload.get("requestBody")
+    elif "json_body" in payload:
+        template = payload.get("json_body")
+    elif "jsonBody" in payload:
+        template = payload.get("jsonBody")
+    else:
+        template = {"taxDocId": tax_doc_id}
+    rendered = _render_tax_doc_id_template_value(template, tax_doc_id=tax_doc_id)
+    if rendered is None:
+        return None
+    if not isinstance(rendered, dict):
+        raise ValueError("report submit request body template must render to an object")
+    return rendered
+
+
+def _tax_report_stage_request_body(
+    payload: dict[str, Any],
+    *,
+    stage: str,
+    tax_doc_id: int,
+    method: str,
+) -> dict[str, Any] | None:
+    camel_stage = "".join(part.capitalize() if index else part for index, part in enumerate(stage.split("_")))
+    for key in (
+        f"{stage}_request_body",
+        f"{camel_stage}RequestBody",
+        f"{stage}_json_body",
+        f"{camel_stage}JsonBody",
+    ):
+        if key in payload:
+            rendered = _render_tax_doc_id_template_value(payload.get(key), tax_doc_id=tax_doc_id)
+            if rendered is None:
+                return None
+            if not isinstance(rendered, dict):
+                raise ValueError(f"{stage} request body template must render to an object")
+            return rendered
+    if method == "GET":
+        return None
+    return _tax_report_request_body(payload, tax_doc_id=tax_doc_id)
+
+
+def _response_json_ok(response_json: Any) -> bool | None:
+    if not isinstance(response_json, dict):
+        return None
+    response_ok = response_json.get("ok")
+    if isinstance(response_ok, bool):
+        return response_ok
+    return None
+
+
+def _is_retryable_report_transport_response(response: dict[str, Any]) -> bool:
+    if response.get("fetch_error"):
+        return True
+    try:
+        status_code = int(response.get("status") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    return status_code == 0 or status_code in {408, 425, 429} or 500 <= status_code <= 599
+
+
 def preview_expected_tax_send_targets(
     *,
     bot_id: str,
@@ -663,6 +995,14 @@ def preview_expected_tax_send_targets(
     year = _resolve_taxdoc_year(payload)
     size = _resolve_taxdoc_page_size(payload)
     page_index = max(0, int(payload.get("page", 0)))
+    workflow_filter_set = str(payload.get("workflow_filter_set") or payload.get("workflowFilterSet") or "ASSIGN_WAITING")
+    tax_doc_custom_type_filter = str(
+        payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "ALL"
+    )
+    apply_expense_rate_type_filter = str(
+        payload.get("apply_expense_rate_type_filter") or payload.get("applyExpenseRateTypeFilter") or "ALL"
+    )
+    direction = str(payload.get("direction") or "DESC").upper()
 
     if is_browser_control_dry_run(payload):
         return {
@@ -713,6 +1053,10 @@ def preview_expected_tax_send_targets(
                 year=year,
                 page=target_page_index,
                 size=size,
+                workflow_filter_set=workflow_filter_set,
+                tax_doc_custom_type_filter=tax_doc_custom_type_filter,
+                apply_expense_rate_type_filter=apply_expense_rate_type_filter,
+                direction=direction,
             )
             list_response = _browser_fetch_json(
                 page,
@@ -830,6 +1174,320 @@ def _normalize_tax_doc_ids(raw_ids: Any) -> list[int]:
             raise ValueError("tax_doc_ids must contain positive integers")
         tax_doc_ids.append(tax_doc_id)
     return list(dict.fromkeys(tax_doc_ids))
+
+
+def submit_tax_reports(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Submit reporter tax-report stages for explicit taxDocIds.
+
+    Failure responses for national tax, local tax, receipt scraping, or final
+    completion are logged and the taxDoc is moved to customType=다 before the
+    batch continues.  Fully completed taxDocs remove any stale response-log rows.
+    """
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    tax_doc_ids = sorted(_tax_doc_ids_from_payload(payload))
+    report_label = str(payload.get("report_label") or payload.get("reportLabel") or "국세신고")
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"{report_label} dry-run {len(tax_doc_ids)}건",
+            "attempted_count": len(tax_doc_ids),
+            "success_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "tax_doc_ids": tax_doc_ids,
+            "results": [],
+            "failures": [],
+            "log_file": TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE,
+            "failure_summary_file": TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE,
+        }
+
+    if not tax_doc_ids:
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": f"{report_label} 대상 없음",
+            "attempted_count": 0,
+            "success_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "tax_doc_ids": [],
+            "results": [],
+            "failures": [],
+            "log_file": TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE,
+            "failure_summary_file": TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE,
+        }
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    national_url_template = _resolve_report_submit_url_template(payload, api_base_url=api_base_url)
+    local_url_template = _resolve_optional_report_url_template(
+        payload,
+        api_base_url=api_base_url,
+        url_keys=("local_submit_url_template", "localSubmitUrlTemplate", "local_tax_submit_url_template", "localTaxSubmitUrlTemplate"),
+        path_keys=("local_submit_path_template", "localSubmitPathTemplate", "local_tax_submit_path_template", "localTaxSubmitPathTemplate"),
+        url_env_names=("INCOME33_LOCAL_TAX_REPORT_SUBMIT_URL_TEMPLATE",),
+        path_env_names=("INCOME33_LOCAL_TAX_REPORT_SUBMIT_PATH_TEMPLATE",),
+    )
+    receipt_url_template = _resolve_optional_report_url_template(
+        payload,
+        api_base_url=api_base_url,
+        url_keys=("receipt_url_template", "receiptUrlTemplate", "receipt_scrape_url_template", "receiptScrapeUrlTemplate"),
+        path_keys=("receipt_path_template", "receiptPathTemplate", "receipt_scrape_path_template", "receiptScrapePathTemplate"),
+        url_env_names=("INCOME33_REPORT_RECEIPT_URL_TEMPLATE", "INCOME33_REPORT_RECEIPT_SCRAPE_URL_TEMPLATE"),
+        path_env_names=("INCOME33_REPORT_RECEIPT_PATH_TEMPLATE", "INCOME33_REPORT_RECEIPT_SCRAPE_PATH_TEMPLATE"),
+    )
+    completion_url_template = _resolve_optional_report_url_template(
+        payload,
+        api_base_url=api_base_url,
+        url_keys=("completion_url_template", "completionUrlTemplate", "complete_url_template", "completeUrlTemplate"),
+        path_keys=("completion_path_template", "completionPathTemplate", "complete_path_template", "completePathTemplate"),
+        url_env_names=("INCOME33_REPORT_COMPLETION_URL_TEMPLATE", "INCOME33_REPORT_COMPLETE_URL_TEMPLATE"),
+        path_env_names=("INCOME33_REPORT_COMPLETION_PATH_TEMPLATE", "INCOME33_REPORT_COMPLETE_PATH_TEMPLATE"),
+    )
+    web_path = str(
+        payload.get("report_web_path")
+        or payload.get("web_path")
+        or os.getenv("INCOME33_REPORT_WEB_PATH")
+        or "https://newta.3o3.co.kr/tasks/report"
+    )
+    national_method = str(payload.get("method") or payload.get("national_tax_method") or "POST").strip().upper()
+    if national_method not in {"GET", "POST", "PUT", "PATCH"}:
+        raise ValueError("report submit method must be GET, POST, PUT, or PATCH")
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": web_path,
+    }
+    run_id = str(
+        payload.get("run_id")
+        or payload.get("runId")
+        or f"{bot_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    )
+    failure_custom_type = _resolve_report_failure_custom_type(payload)
+    stage_specs: list[dict[str, Any]] = [
+        {
+            "stage": "national_tax",
+            "label": "국세신고",
+            "url_template": national_url_template,
+            "method": national_method,
+        }
+    ]
+    if local_url_template:
+        stage_specs.append(
+            {
+                "stage": "local_tax",
+                "label": "지방세신고",
+                "url_template": local_url_template,
+                "method": _resolve_report_stage_method(payload, stage="local_tax", fallback="POST"),
+            }
+        )
+    if receipt_url_template:
+        stage_specs.append(
+            {
+                "stage": "receipt",
+                "label": "접수증스크래핑",
+                "url_template": receipt_url_template,
+                "method": _resolve_report_stage_method(payload, stage="receipt", fallback="GET"),
+            }
+        )
+    if completion_url_template:
+        stage_specs.append(
+            {
+                "stage": "completion",
+                "label": "신고완료",
+                "url_template": completion_url_template,
+                "method": _resolve_report_stage_method(payload, stage="completion", fallback="POST"),
+            }
+        )
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(web_path, wait_until="domcontentloaded")
+
+        results: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        success_count = 0
+        log_path: Path | None = None
+        summary_log_path: Path | None = None
+        for attempt_index, tax_doc_id in enumerate(tax_doc_ids, start=1):
+            item_failed = False
+            for stage_spec in stage_specs:
+                stage = str(stage_spec["stage"])
+                stage_label = str(stage_spec["label"])
+                method = str(stage_spec["method"])
+                stage_url = _format_tax_doc_id_template(str(stage_spec["url_template"]), tax_doc_id=int(tax_doc_id))
+                request_body = _tax_report_stage_request_body(
+                    payload,
+                    stage=stage,
+                    tax_doc_id=int(tax_doc_id),
+                    method=method,
+                )
+                try:
+                    response = _browser_fetch_json(
+                        page,
+                        url=stage_url,
+                        method=method,
+                        headers=headers,
+                        json_body=request_body,
+                    )
+                except Exception as exc:  # Log unexpected browser/serialization failures per taxDocId/stage.
+                    response = {
+                        "ok": False,
+                        "status": 0,
+                        "url": stage_url,
+                        "json": None,
+                        "text": None,
+                        "fetch_error": str(exc),
+                    }
+
+                response_json = response.get("json")
+                response_json_ok = _response_json_ok(response_json)
+                response_ok = bool(response.get("ok"))
+                retryable_transport_status = _is_retryable_report_transport_response(response)
+                stage_success = response_ok and response_json_ok is not False
+                failure_reason = _report_failure_reason(response, response_json)
+                stage_result = {
+                    "tax_doc_id": int(tax_doc_id),
+                    "stage": stage,
+                    "stage_label": stage_label,
+                    "status_code": response.get("status"),
+                    "response_ok": response_ok,
+                    "response_json_ok": response_json_ok,
+                    "retryable_transport_status": retryable_transport_status,
+                }
+                if stage_success:
+                    continue
+
+                custom_type = failure_custom_type
+                custom_type_status_code: int | None = None
+                custom_type_error: str | None = None
+                if custom_type:
+                    try:
+                        custom_response = _put_custom_type_for_taxdoc(
+                            page=page,
+                            api_base_url=api_base_url,
+                            tax_doc_id=int(tax_doc_id),
+                            headers=headers,
+                            custom_type=custom_type,
+                        )
+                        custom_type_status_code = custom_response.get("status")
+                    except Exception as custom_exc:  # Keep the original response log even if type-setting fails.
+                        custom_type_error = str(custom_exc)
+                        logger.exception(
+                            "tax_report_failure_custom_type_failed bot_id=%s tax_doc_id=%s stage=%s custom_type=%s",
+                            bot_id,
+                            tax_doc_id,
+                            stage,
+                            custom_type,
+                        )
+
+                failure = {
+                    **stage_result,
+                    "custom_type": custom_type,
+                    "custom_type_status_code": custom_type_status_code,
+                    "custom_type_error": custom_type_error,
+                    "failure_reason": failure_reason,
+                }
+                failures.append(failure)
+                results.append({**failure, "status": "skipped"})
+                log_entry = {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "run_id": run_id,
+                    "bot_id": bot_id,
+                    "report_label": report_label,
+                    "attempt_index": attempt_index,
+                    "tax_doc_id": int(tax_doc_id),
+                    "stage": stage,
+                    "stage_label": stage_label,
+                    "request": {
+                        "method": method,
+                        "url": response.get("url") or stage_url,
+                        "body": request_body,
+                    },
+                    "response_status": response.get("status"),
+                    "response_ok": response_ok,
+                    "response_json_ok": response_json_ok,
+                    "retryable_transport_status": retryable_transport_status,
+                    "fetch_error": response.get("fetch_error"),
+                    "response_json": response_json,
+                    "response_text": response.get("text"),
+                    "custom_type": custom_type,
+                    "custom_type_status_code": custom_type_status_code,
+                    "custom_type_error": custom_type_error,
+                    "failure_reason": failure_reason,
+                }
+                log_path = _write_tax_report_submit_response_log(log_entry)
+                summary_log_path = _write_tax_report_submit_failure_summary(log_entry)
+                logger.warning(
+                    "tax_report_stage_failed_logged bot_id=%s tax_doc_id=%s stage=%s status=%s custom_type=%s custom_type_status=%s",
+                    bot_id,
+                    tax_doc_id,
+                    stage,
+                    response.get("status"),
+                    custom_type,
+                    custom_type_status_code,
+                )
+                item_failed = True
+                break
+
+            if item_failed:
+                continue
+
+            success_count += 1
+            _delete_tax_report_submit_response_logs_for_taxdoc(tax_doc_id=int(tax_doc_id))
+            _delete_tax_report_submit_failure_summaries_for_taxdoc(tax_doc_id=int(tax_doc_id))
+            results.append(
+                {
+                    "tax_doc_id": int(tax_doc_id),
+                    "status": "completed",
+                    "stage": "completion" if completion_url_template else str(stage_specs[-1]["stage"]),
+                }
+            )
+
+        failed_count = len(failures)
+        log_file_name = log_path.name if log_path else TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
+        summary_log_file_name = summary_log_path.name if summary_log_path else TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE
+        log_label = log_file_name if failed_count else "없음"
+        summary_log_label = summary_log_file_name if failed_count else "없음"
+        return {
+            "ok": failed_count == 0,
+            "dry_run": False,
+            "status": "session_active" if failed_count == 0 else "manual_required",
+            "current_step": f"{report_label} 응답수집 완료 성공={success_count}건 패스={failed_count}건 실패={failed_count}건 공유로그={summary_log_label} 원본로그={log_label}",
+            "debug_port": debug_port,
+            "run_id": run_id,
+            "attempted_count": len(tax_doc_ids),
+            "success_count": success_count,
+            "skipped_count": failed_count,
+            "failed_count": failed_count,
+            "tax_doc_ids": tax_doc_ids,
+            "results": results,
+            "failures": failures,
+            "log_file": log_label,
+            "failure_summary_file": summary_log_label,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "tax_report_submit_done bot_id=%s run_id=%s attempted=%s success=%s skipped=%s failed=%s log_file=%s",
+        bot_id,
+        result.get("run_id"),
+        result.get("attempted_count"),
+        result.get("success_count"),
+        result.get("skipped_count"),
+        result.get("failed_count"),
+        result.get("log_file"),
+    )
+    return result
 
 
 def send_expected_tax_amounts(
@@ -969,6 +1627,153 @@ def send_expected_tax_amounts(
         sent_ids,
         verify_count,
         remaining_sent_ids,
+    )
+    return result
+
+
+def send_simple_expense_rate_expected_tax_amounts(
+    *,
+    bot_id: str,
+    payload: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    logger = logger or logging.getLogger("income33.agent.browser_control")
+    payload = payload or {}
+    requested_tax_doc_ids = _tax_doc_ids_from_payload(payload)
+
+    if requested_tax_doc_ids:
+        tax_doc_ids = requested_tax_doc_ids
+    else:
+        preview_payload = dict(payload)
+        preview_payload.setdefault("workflow_filter_set", "REVIEW_WAITING")
+        preview_payload.setdefault("apply_expense_rate_type_filter", "SIMPLIFIED_EXPENSE_RATE")
+        preview_payload.setdefault("tax_doc_custom_type_filter", "NONE")
+        preview_payload.setdefault("direction", "ASC")
+        preview = preview_expected_tax_send_targets(
+            bot_id=bot_id,
+            payload=preview_payload,
+            logger=logger,
+        )
+        tax_doc_ids = [int(tax_doc_id) for tax_doc_id in list(preview.get("tax_doc_ids") or [])]
+
+    if is_browser_control_dry_run(payload):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "status": "session_active",
+            "current_step": f"단순경비율 목록발송 dry-run {len(tax_doc_ids)}건",
+            "attempted_count": len(tax_doc_ids),
+            "sent_count": 0,
+            "failed_count": 0,
+            "tax_doc_ids": tax_doc_ids,
+            "failures": [],
+        }
+
+    if not tax_doc_ids:
+        return {
+            "ok": True,
+            "dry_run": False,
+            "status": "session_active",
+            "current_step": "단순경비율 목록발송 대상 없음",
+            "attempted_count": 0,
+            "sent_count": 0,
+            "failed_count": 0,
+            "tax_doc_ids": [],
+            "failures": [],
+        }
+
+    api_base_url = _resolve_tax_api_base_url(payload)
+    send_web_path = str(
+        payload.get("send_web_path")
+        or os.getenv("INCOME33_SIMPLE_EXPENSE_RATE_SEND_WEB_PATH")
+        or "https://newta.3o3.co.kr/git/summary"
+    )
+    submit_account_type = str(
+        payload.get("submit_account_type") or payload.get("submitAccountType") or "CUSTOMER"
+    ).strip().upper()
+    calculation_type = str(payload.get("calculation_type") or payload.get("calculationType") or "ESTIMATE").strip().upper()
+
+    def _int_field(*keys: str, default: int = 0) -> int:
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                value = payload.get(key)
+                if isinstance(value, bool):
+                    continue
+                return int(value)
+        return default
+
+    send_body = {
+        "calculationType": calculation_type,
+        "submitAccountType": submit_account_type,
+        "추가_경비_인정액": _int_field("추가_경비_인정액", "additional_expense_amount", "additionalExpenseAmount", default=0),
+        "expectedTaxAmount": _int_field("expected_tax_amount", "expectedTaxAmount", default=0),
+        "expectedLocalTaxAmount": _int_field("expected_local_tax_amount", "expectedLocalTaxAmount", default=0),
+        "submitFee": _int_field("submit_fee", "submitFee", default=0),
+        "advisedFeeAmount": _int_field("advised_fee_amount", "advisedFeeAmount", default=0),
+        "isCustomReview": bool(payload.get("isCustomReview", False)),
+        "isTimeDiscount": bool(payload.get("isTimeDiscount", False)),
+        "timeDiscountFee": payload.get("timeDiscountFee"),
+    }
+
+    headers = {
+        "accept": "application/json, text/plain, */*",
+        "x-host": "GIT",
+        "x-web-path": send_web_path,
+    }
+
+    def _run(page: Any, debug_port: int) -> dict[str, Any]:
+        if not str(page.url).startswith("https://newta.3o3.co.kr"):
+            page.goto(send_web_path, wait_until="domcontentloaded")
+
+        failures: list[dict[str, Any]] = []
+        sent_count = 0
+        for tax_doc_id in tax_doc_ids:
+            send_url = f"{api_base_url}/api/tax/v1/taxdocs/{int(tax_doc_id)}/expected-tax-amount/send"
+            send_response = _browser_fetch_json(
+                page,
+                url=send_url,
+                method="POST",
+                headers=headers,
+                json_body=send_body,
+            )
+            send_json = send_response.get("json") or {}
+            result_data = send_json.get("data")
+            result_ok = result_data.get("result") is True if isinstance(result_data, dict) else result_data is True
+            if send_response.get("ok") and send_json.get("ok") and result_ok:
+                sent_count += 1
+                continue
+            failures.append(
+                {
+                    "tax_doc_id": int(tax_doc_id),
+                    "status": send_response.get("status"),
+                    "fetch_error": send_response.get("fetch_error"),
+                    "error": send_json.get("error"),
+                    "response_text": send_response.get("text"),
+                }
+            )
+
+        failed_count = len(failures)
+        return {
+            "ok": failed_count == 0,
+            "dry_run": False,
+            "status": "session_active" if failed_count == 0 else "manual_required",
+            "current_step": f"단순경비율 목록발송 완료 발송={sent_count}건 실패={failed_count}건",
+            "attempted_count": len(tax_doc_ids),
+            "sent_count": sent_count,
+            "failed_count": failed_count,
+            "tax_doc_ids": tax_doc_ids,
+            "failures": failures,
+            "send_body": send_body,
+            "debug_port": debug_port,
+        }
+
+    result = _run_in_cdp_session(bot_id, payload, _run)
+    logger.info(
+        "send_simple_expense_rate_expected_tax_amounts_done bot_id=%s attempted=%s sent=%s failed=%s",
+        bot_id,
+        result.get("attempted_count"),
+        result.get("sent_count"),
+        result.get("failed_count"),
     )
     return result
 
@@ -1189,12 +1994,13 @@ def _write_bookkeeping_expense_rate_skip_log(entry: dict[str, Any]) -> None:
         handle.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _put_custom_type_da_for_taxdoc(
+def _put_custom_type_for_taxdoc(
     *,
     page: Any,
     api_base_url: str,
     tax_doc_id: int,
     headers: dict[str, str],
+    custom_type: str,
 ) -> dict[str, Any]:
     custom_type_url = f"{api_base_url}/api/tax/v1/taxdocs/{tax_doc_id}/custom-type"
     response = _browser_fetch_json(
@@ -1202,12 +2008,28 @@ def _put_custom_type_da_for_taxdoc(
         url=custom_type_url,
         method="PUT",
         headers=headers,
-        json_body={"customType": "다"},
+        json_body={"customType": custom_type},
     )
     response_json = response.get("json") or {}
     if not response.get("ok") or not response_json.get("ok"):
         raise RuntimeError(f"custom type update failed status={response.get('status')}")
     return response
+
+
+def _put_custom_type_da_for_taxdoc(
+    *,
+    page: Any,
+    api_base_url: str,
+    tax_doc_id: int,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    return _put_custom_type_for_taxdoc(
+        page=page,
+        api_base_url=api_base_url,
+        tax_doc_id=tax_doc_id,
+        headers=headers,
+        custom_type="다",
+    )
 
 
 def _fetch_required_json_data(page: Any, *, url: str, headers: dict[str, str], label: str) -> dict[str, Any]:

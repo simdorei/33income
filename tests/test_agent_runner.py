@@ -3,6 +3,7 @@ import json
 from income33.agent.runner import AgentRunner
 from income33.config import AgentConfig
 from income33.control_tower.service import (
+    reporter_only_commands,
     sender_only_commands,
     should_cancel_repeated_send_before_command,
 )
@@ -213,6 +214,39 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_handles_send_simple_expense_rate_expected_tax_amounts_command(monkeypatch):
+    calls = []
+
+    def fake_send_simple_expense_rate_expected_tax_amounts(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        assert client.heartbeats[-1]["current_step"] == "단순경비율 목록발송 중"
+        return {
+            "status": "session_active",
+            "current_step": "단순경비율 목록발송 완료 발송=2건 실패=0건",
+        }
+
+    monkeypatch.setattr(
+        "income33.agent.runner.send_simple_expense_rate_expected_tax_amounts",
+        fake_send_simple_expense_rate_expected_tax_amounts,
+    )
+    runner, client = build_runner(
+        [
+            {
+                "id": 141,
+                "command": "send_simple_expense_rate_expected_tax_amounts",
+                "payload_json": json.dumps({}),
+            }
+        ]
+    )
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {}}]
+    assert client.completed == [{"command_id": 141, "status": "done", "error_message": None}]
+    assert runner.bot.status == "session_active"
+    assert client.heartbeats[-1]["current_step"] == "단순경비율 목록발송 완료 발송=2건 실패=0건"
+
+
 def test_runner_fails_send_command_when_payload_json_is_invalid_json(monkeypatch):
     calls = []
 
@@ -258,12 +292,63 @@ def test_runner_rejects_sender_only_command_on_reporter(monkeypatch):
 def test_runner_sender_only_guard_uses_control_tower_policy_set():
     expected = {
         "send_expected_tax_amounts",
+        "send_simple_expense_rate_expected_tax_amounts",
         "send_bookkeeping_expected_tax_amount",
         "send_rate_based_bookkeeping_expected_tax_amount",
         "preview_rate_based_bookkeeping_expected_tax_amounts",
         "send_rate_based_bookkeeping_expected_tax_amounts",
     }
     assert sender_only_commands() == expected
+
+
+def test_runner_handles_submit_tax_reports_command_on_reporter(monkeypatch):
+    calls = []
+
+    def fake_submit_tax_reports(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        assert client.heartbeats[-1]["current_step"] == "국세신고 응답수집 중"
+        return {
+            "status": "manual_required",
+            "current_step": "국세신고 응답수집 완료 성공=1건 실패=1건 로그=tax_report_submit_responses.jsonl",
+        }
+
+    monkeypatch.setattr("income33.agent.runner.submit_tax_reports", fake_submit_tax_reports)
+    runner, client = build_runner(
+        [
+            {
+                "id": 31,
+                "command": "submit_tax_reports",
+                "payload_json": json.dumps({"tax_doc_ids": [1001, 1002]}),
+            }
+        ],
+        bot_id="reporter-01",
+        bot_type="reporter",
+    )
+
+    runner.run_once()
+
+    assert calls == [{"bot_id": "reporter-01", "payload": {"tax_doc_ids": [1001, 1002]}}]
+    assert client.completed == [{"command_id": 31, "status": "done", "error_message": None}]
+    assert runner.bot.status == "manual_required"
+    assert client.heartbeats[-1]["current_step"] == "국세신고 응답수집 완료 성공=1건 실패=1건 로그=tax_report_submit_responses.jsonl"
+
+
+def test_runner_rejects_reporter_only_command_on_sender(monkeypatch):
+    runner, client = build_runner(
+        [{"id": 32, "command": "submit_tax_reports", "payload_json": json.dumps({"tax_doc_ids": [1001]})}],
+        bot_id="sender-01",
+        bot_type="sender",
+    )
+
+    runner.run_once()
+
+    assert client.completed == [{"command_id": 32, "status": "failed", "error_message": "REPORTER_ONLY_COMMAND: submit_tax_reports"}]
+    assert client.heartbeats[-1]["bot_status"] == "manual_required"
+    assert "REPORTER_ONLY_COMMAND" in client.heartbeats[-1]["current_step"]
+
+
+def test_runner_reporter_only_guard_uses_control_tower_policy_set():
+    assert reporter_only_commands() == {"submit_tax_reports"}
 
 
 def test_runner_repeat_cancel_guard_uses_control_tower_policy_set():
