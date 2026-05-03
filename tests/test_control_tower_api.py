@@ -164,7 +164,8 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "return confirm" in root.text
-    assert "국세신고 응답로그" in root.text
+    assert "신고준비(음수항목 보정)" in root.text
+    assert "신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
     assert "/ui/bots/reporter-01/tax-report-submit-list" in root.text
     assert "/ui/bots/sender-01/tax-report-submit-list" not in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text

@@ -97,10 +97,10 @@ def _taxdoc_id_list_tax_report_submit_form(bot_id: str) -> str:
         f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-submit-list' "
         "class='inline-form' style='display:inline'>"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='신고 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "placeholder='신고준비 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 국세신고를 순차 실행하고 응답 원문을 로그로 남길까요?')\">"
-        "국세신고 응답로그</button>"
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 신고준비(담당자 배정+음수항목 보정)만 순차 실행할까요?')\">"
+        "신고준비(음수항목 보정)</button>"
         "</form>"
     )
 
@@ -426,6 +426,8 @@ def create_app(
 
     @app.post("/ui/bots/{bot_id}/tax-report-submit-list")
     async def queue_tax_report_submit_list(bot_id: str, request: Request) -> RedirectResponse:
+        # 현재 대시보드 신고 버튼은 실제 국세/지방세 제출이 아니라
+        # 신고 전 준비 단계(담당자 배정 + minus-amount correction)만 큐잉한다.
         return await _queue_tax_doc_id_list_command(
             bot_id=bot_id,
             request=request,

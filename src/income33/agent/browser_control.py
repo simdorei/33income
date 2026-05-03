@@ -1,3 +1,10 @@
+"""NewTA browser/CDP control workflows for 33income bots.
+
+This module intentionally centralizes the browser-session API calls that still
+need authenticated NewTA state. Search the section headers below when changing
+one operator feature; most Control Tower commands eventually dispatch here.
+"""
+
 from __future__ import annotations
 
 import json
@@ -58,6 +65,10 @@ POSIX_BROWSER_CANDIDATES = [
     "msedge",
 ]
 
+
+# ---------------------------------------------------------------------------
+# 공통 환경값 / 브라우저 실행 / CDP 세션 헬퍼
+# ---------------------------------------------------------------------------
 
 def _env_bool(name: str, fallback: bool = False) -> bool:
     value = os.getenv(name)
@@ -552,6 +563,12 @@ def inspect_login_state(
     return result
 
 
+# ---------------------------------------------------------------------------
+# NewTA taxDoc 목록조회 공통 헬퍼
+# - officeId 선택, filter-search URL 조립, 브라우저 fetch 래퍼
+# - sender/reporter/list-send 계열이 같이 쓰는 기반 코드
+# ---------------------------------------------------------------------------
+
 def _resolve_tax_api_base_url(payload: dict[str, Any] | None = None) -> str:
     payload = payload or {}
     return str(payload.get("api_base_url") or os.getenv("INCOME33_TAX_API_BASE_URL") or DEFAULT_API_BASE_URL).rstrip("/")
@@ -806,6 +823,12 @@ TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE = "tax_report_submit_responses.jsonl"
 TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE = "tax_report_submit_failures.txt"
 
 
+# ---------------------------------------------------------------------------
+# Reporter 신고 제출 실패 로그/요약 로그 헬퍼
+# - raw JSONL: tax_report_submit_responses.jsonl
+# - 공유용 한 줄 요약: tax_report_submit_failures.txt
+# ---------------------------------------------------------------------------
+
 def _tax_report_submit_response_log_path() -> Path:
     return resolve_log_dir() / TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
 
@@ -929,6 +952,11 @@ def _delete_tax_report_submit_failure_summaries_for_taxdoc(*, tax_doc_id: int) -
         log_path.unlink(missing_ok=True)
     return log_path
 
+
+# ---------------------------------------------------------------------------
+# Reporter 신고 API 템플릿 / stage 요청 / retry 판정 헬퍼
+# - start/write API와 poll/status API를 분리해서 다루기 위한 준비 코드
+# ---------------------------------------------------------------------------
 
 def _resolve_report_submit_url_template(payload: dict[str, Any], *, api_base_url: str) -> str:
     template = (
@@ -1158,6 +1186,12 @@ def _fetch_with_retryable_transport(
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Sender 목록조회 preview
+# - NewTA filter-search 전체 페이지를 수집하고 taxDocId만 추출
+# - simple-expense/customer-estimate 목록발송도 여기서 대상 목록을 가져온다
+# ---------------------------------------------------------------------------
+
 def preview_expected_tax_send_targets(
     *,
     bot_id: str,
@@ -1355,6 +1389,16 @@ def _normalize_tax_doc_ids(raw_ids: Any) -> list[int]:
         tax_doc_ids.append(tax_doc_id)
     return list(dict.fromkeys(tax_doc_ids))
 
+
+# ---------------------------------------------------------------------------
+# Reporter 신고준비 / 신고 제출 workflow
+# - 현재 대시보드 /tax-report-submit-list는 prepare_only=True로 큐잉된다.
+# - 구현된 신고준비 범위: 현재 담당자 배정 → 사업소득 business-incomes 조회
+#   → 사업자번호별 minus-amount correction. 실제 국세/지방세 제출은 하지 않는다.
+# - legacy submit 모드는 명시 URL 템플릿이 있을 때만 국세/지방세/접수증/완료
+#   stage를 one-shot 순차 호출하고 실패 로그를 남긴다. NewTA 신고하기 전체
+#   start/poll/완료 체인은 아직 캡처 기반으로 구현되지 않았다.
+# ---------------------------------------------------------------------------
 
 def submit_tax_reports(
     *,
@@ -1721,6 +1765,8 @@ def submit_tax_reports(
             "tax_accountant_id": assign_result.get("tax_accountant_id"),
         }
 
+    # 명시 템플릿을 넣은 수동/legacy 경로. 신고준비를 먼저 수행하지 않고,
+    # 설정된 stage URL을 taxDocId별로 한 번씩 호출해 응답/실패 로그만 수집한다.
     def _run_legacy_submit(page: Any, debug_port: int) -> dict[str, Any]:
         assert national_url_template is not None
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
@@ -1951,6 +1997,12 @@ def submit_tax_reports(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Sender 일반 계산발송 workflow
+# - dashboard의 일반 `계산발송` 버튼이 쓰는 기존 반복 발송 경로
+# - 목록조회 결과를 taxDocIdSet payload로 NewTA send API에 전달
+# ---------------------------------------------------------------------------
+
 def send_expected_tax_amounts(
     *,
     bot_id: str,
@@ -2123,6 +2175,12 @@ def _simple_expense_failure_detail(failure: dict[str, Any]) -> str:
             return detail
     return ""
 
+
+# ---------------------------------------------------------------------------
+# Sender 단순경비율 목록발송 workflow
+# - filter-search → summary taxRay gate → calculation estimate → send 순서
+# - reviewTypeFilter=NORMAL 등 이 기능의 payload/query 변경은 위 목록조회 헬퍼 확인
+# ---------------------------------------------------------------------------
 
 def send_simple_expense_rate_expected_tax_amounts(
     *,
@@ -2500,6 +2558,12 @@ def send_simple_expense_rate_expected_tax_amounts(
     return result
 
 
+# ---------------------------------------------------------------------------
+# 경비율 장부발송 계산 헬퍼
+# - business-incomes / eligible expense / 업종코드별 단순경비율 계산
+# - money 처리는 Decimal 기반으로 반올림/버림 규칙을 고정
+# ---------------------------------------------------------------------------
+
 def _money_decimal(value: Any) -> Decimal:
     if value is None or value is False or value is True:
         return Decimal(0)
@@ -2827,6 +2891,12 @@ def _required_int_field(data: dict[str, Any], key: str, *, label: str | None = N
         raise RuntimeError(f"missing {label or key}")
     return int(raw_value)
 
+
+# ---------------------------------------------------------------------------
+# 경비율 장부발송 단건 workflow
+# - taxDocId 하나에 대해 business-incomes 조회 → 경비 계산 → calculation/bookkeeping → send
+# - 필요 시 memo/customType 업데이트와 skip log를 함께 처리
+# ---------------------------------------------------------------------------
 
 def _bookkeeping_calculation_url(
     *,
@@ -3224,6 +3294,12 @@ def send_rate_based_bookkeeping_expected_tax_amount(
     return send_result
 
 
+# ---------------------------------------------------------------------------
+# 경비율 장부발송 목록/일괄 workflow
+# - preview: 현재 목록조회 대상 확인
+# - bulk: explicit taxDocId 목록을 단건 workflow로 순차 처리
+# ---------------------------------------------------------------------------
+
 def preview_rate_based_bookkeeping_expected_tax_amounts(
     *,
     bot_id: str,
@@ -3335,6 +3411,12 @@ def send_rate_based_bookkeeping_expected_tax_amounts(
         "preview": preview,
     }
 
+
+# ---------------------------------------------------------------------------
+# 담당자 배정 workflow
+# - 현재 로그인된 세무담당자/계정으로 taxDocIds를 배정
+# - reporter prepare-only가 신고준비 전에 호출한다
+# ---------------------------------------------------------------------------
 
 def _assign_taxdocs_to_current_accountant_in_page(
     *,
@@ -3449,6 +3531,10 @@ def assign_taxdocs_to_current_accountant(
     )
     return result
 
+
+# ---------------------------------------------------------------------------
+# 브라우저 keepalive / refresh helpers
+# ---------------------------------------------------------------------------
 
 def refresh_page(
     *,
