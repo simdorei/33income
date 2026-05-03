@@ -1664,9 +1664,11 @@ def send_simple_expense_rate_expected_tax_amounts(
             "current_step": f"단순경비율 목록발송 dry-run {len(tax_doc_ids)}건",
             "attempted_count": len(tax_doc_ids),
             "sent_count": 0,
+            "skipped_count": 0,
             "failed_count": 0,
             "tax_doc_ids": tax_doc_ids,
             "failures": [],
+            "skipped": [],
         }
 
     if not tax_doc_ids:
@@ -1677,9 +1679,11 @@ def send_simple_expense_rate_expected_tax_amounts(
             "current_step": "단순경비율 목록발송 대상 없음",
             "attempted_count": 0,
             "sent_count": 0,
+            "skipped_count": 0,
             "failed_count": 0,
             "tax_doc_ids": [],
             "failures": [],
+            "skipped": [],
         }
 
     api_base_url = _resolve_tax_api_base_url(payload)
@@ -1693,26 +1697,9 @@ def send_simple_expense_rate_expected_tax_amounts(
     ).strip().upper()
     calculation_type = str(payload.get("calculation_type") or payload.get("calculationType") or "ESTIMATE").strip().upper()
 
-    def _int_field(*keys: str, default: int = 0) -> int:
-        for key in keys:
-            if key in payload and payload.get(key) is not None:
-                value = payload.get(key)
-                if isinstance(value, bool):
-                    continue
-                return int(value)
-        return default
-
     send_body = {
         "calculationType": calculation_type,
         "submitAccountType": submit_account_type,
-        "추가_경비_인정액": _int_field("추가_경비_인정액", "additional_expense_amount", "additionalExpenseAmount", default=0),
-        "expectedTaxAmount": _int_field("expected_tax_amount", "expectedTaxAmount", default=0),
-        "expectedLocalTaxAmount": _int_field("expected_local_tax_amount", "expectedLocalTaxAmount", default=0),
-        "submitFee": _int_field("submit_fee", "submitFee", default=0),
-        "advisedFeeAmount": _int_field("advised_fee_amount", "advisedFeeAmount", default=0),
-        "isCustomReview": bool(payload.get("isCustomReview", False)),
-        "isTimeDiscount": bool(payload.get("isTimeDiscount", False)),
-        "timeDiscountFee": payload.get("timeDiscountFee"),
     }
 
     headers = {
@@ -1726,9 +1713,87 @@ def send_simple_expense_rate_expected_tax_amounts(
             page.goto(send_web_path, wait_until="domcontentloaded")
 
         failures: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         sent_count = 0
+
         for tax_doc_id in tax_doc_ids:
-            send_url = f"{api_base_url}/api/tax/v1/taxdocs/{int(tax_doc_id)}/expected-tax-amount/send"
+            normalized_tax_doc_id = int(tax_doc_id)
+            summary_url = f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/summary?isMasking=true"
+            summary_response = _browser_fetch_json(
+                page,
+                url=summary_url,
+                method="GET",
+                headers=headers,
+            )
+            summary_json = summary_response.get("json")
+            if not summary_response.get("ok"):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "summary",
+                        "reason": "summary_http_non_ok",
+                        "status": summary_response.get("status"),
+                        "fetch_error": summary_response.get("fetch_error"),
+                        "error": None,
+                        "response_text": summary_response.get("text"),
+                    }
+                )
+                continue
+            if not isinstance(summary_json, dict) or not summary_json.get("ok"):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "summary",
+                        "reason": "summary_json_non_ok",
+                        "status": summary_response.get("status"),
+                        "fetch_error": summary_response.get("fetch_error"),
+                        "error": summary_json.get("error") if isinstance(summary_json, dict) else None,
+                        "response_text": summary_response.get("text"),
+                    }
+                )
+                continue
+
+            summary_data = summary_json.get("data")
+            if not isinstance(summary_data, dict) or "taxDocTaxRayList" not in summary_data:
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "summary",
+                        "reason": "summary_data_missing",
+                        "status": summary_response.get("status"),
+                        "fetch_error": summary_response.get("fetch_error"),
+                        "error": summary_json.get("error"),
+                        "response_text": summary_response.get("text"),
+                    }
+                )
+                continue
+
+            tax_ray_list = summary_data.get("taxDocTaxRayList")
+            if not isinstance(tax_ray_list, list):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "summary",
+                        "reason": "summary_tax_ray_list_invalid",
+                        "status": summary_response.get("status"),
+                        "fetch_error": summary_response.get("fetch_error"),
+                        "error": summary_json.get("error"),
+                        "response_text": summary_response.get("text"),
+                    }
+                )
+                continue
+
+            if tax_ray_list:
+                skipped.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "reason": "tax_ray_exists",
+                        "tax_ray_count": len(tax_ray_list),
+                    }
+                )
+                continue
+
+            send_url = f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/expected-tax-amount/send"
             send_response = _browser_fetch_json(
                 page,
                 url=send_url,
@@ -1742,9 +1807,12 @@ def send_simple_expense_rate_expected_tax_amounts(
             if send_response.get("ok") and send_json.get("ok") and result_ok:
                 sent_count += 1
                 continue
+
             failures.append(
                 {
-                    "tax_doc_id": int(tax_doc_id),
+                    "tax_doc_id": normalized_tax_doc_id,
+                    "stage": "send",
+                    "reason": "send_failed",
                     "status": send_response.get("status"),
                     "fetch_error": send_response.get("fetch_error"),
                     "error": send_json.get("error"),
@@ -1753,26 +1821,32 @@ def send_simple_expense_rate_expected_tax_amounts(
             )
 
         failed_count = len(failures)
+        skipped_count = len(skipped)
         return {
             "ok": failed_count == 0,
             "dry_run": False,
             "status": "session_active" if failed_count == 0 else "manual_required",
-            "current_step": f"단순경비율 목록발송 완료 발송={sent_count}건 실패={failed_count}건",
+            "current_step": (
+                f"단순경비율 목록발송 완료 발송={sent_count}건 스킵={skipped_count}건 실패={failed_count}건"
+            ),
             "attempted_count": len(tax_doc_ids),
             "sent_count": sent_count,
+            "skipped_count": skipped_count,
             "failed_count": failed_count,
             "tax_doc_ids": tax_doc_ids,
             "failures": failures,
+            "skipped": skipped,
             "send_body": send_body,
             "debug_port": debug_port,
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
     logger.info(
-        "send_simple_expense_rate_expected_tax_amounts_done bot_id=%s attempted=%s sent=%s failed=%s",
+        "send_simple_expense_rate_expected_tax_amounts_done bot_id=%s attempted=%s sent=%s skipped=%s failed=%s",
         bot_id,
         result.get("attempted_count"),
         result.get("sent_count"),
+        result.get("skipped_count"),
         result.get("failed_count"),
     )
     return result
@@ -1804,7 +1878,7 @@ def _rate_for_industry_code(industry_code: Any) -> Decimal:
     code = str(industry_code or "").strip()
     if code not in SIMPLE_EXPENSE_RATES:
         raise RuntimeError(f"missing simple expense rate for industry_code={code}")
-    return Decimal(str(SIMPLE_EXPENSE_RATES[code])).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    return Decimal(str(SIMPLE_EXPENSE_RATES[code])).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
 def _income_items_from_business_incomes(data: dict[str, Any]) -> list[dict[str, Any]]:

@@ -224,12 +224,13 @@ def test_send_expected_tax_amounts_keeps_session_active_when_collected_targets_a
     assert result["current_step"] == "계산발송 대상 없음"
 
 
-def test_send_simple_expense_rate_expected_tax_amounts_collects_taxdoc_ids_then_posts_each(monkeypatch):
+def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_conditionally_posts(monkeypatch):
     calls = []
 
     def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
         assert payload["workflow_filter_set"] == "REVIEW_WAITING"
         assert payload["apply_expense_rate_type_filter"] == "SIMPLIFIED_EXPENSE_RATE"
+        assert payload["tax_doc_custom_type_filter"] == "NONE"
         assert payload["direction"] == "ASC"
         return {
             "ok": True,
@@ -243,22 +244,30 @@ def test_send_simple_expense_rate_expected_tax_amounts_collects_taxdoc_ids_then_
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
-        assert method == "POST"
         assert headers["x-host"] == "GIT"
         assert headers["x-web-path"] == "https://newta.3o3.co.kr/git/summary"
-        assert json_body == {
-            "calculationType": "ESTIMATE",
-            "submitAccountType": "CUSTOMER",
-            "추가_경비_인정액": 0,
-            "expectedTaxAmount": 0,
-            "expectedLocalTaxAmount": 0,
-            "submitFee": 0,
-            "advisedFeeAmount": 0,
-            "isCustomReview": False,
-            "isTimeDiscount": False,
-            "timeDiscountFee": None,
-        }
-        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        if url.endswith("/api/tax/v1/taxdocs/1368668/summary?isMasking=true"):
+            assert method == "GET"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+
+        if url.endswith("/api/tax/v1/taxdocs/1368668/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body == {
+                "calculationType": "ESTIMATE",
+                "submitAccountType": "CUSTOMER",
+            }
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        if url.endswith("/api/tax/v1/taxdocs/1368669/summary?isMasking=true"):
+            assert method == "GET"
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"taxDocTaxRayList": [{"id": 1, "type": "중복수입의심"}]}},
+            }
+
+        raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(browser_control, "preview_expected_tax_send_targets", fake_preview_expected_tax_send_targets)
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
@@ -266,13 +275,90 @@ def test_send_simple_expense_rate_expected_tax_amounts_collects_taxdoc_ids_then_
 
     result = browser_control.send_simple_expense_rate_expected_tax_amounts(bot_id="sender-01", payload={})
 
-    assert len(calls) == 2
-    assert calls[0]["url"].endswith("/api/tax/v1/taxdocs/1368668/expected-tax-amount/send")
-    assert calls[1]["url"].endswith("/api/tax/v1/taxdocs/1368669/expected-tax-amount/send")
+    assert [
+        (call["method"], call["url"].split("/api/tax/v1/taxdocs/")[1])
+        for call in calls
+    ] == [
+        ("GET", "1368668/summary?isMasking=true"),
+        ("POST", "1368668/expected-tax-amount/send"),
+        ("GET", "1368669/summary?isMasking=true"),
+    ]
     assert result["ok"] is True
-    assert result["sent_count"] == 2
+    assert result["attempted_count"] == 2
+    assert result["sent_count"] == 1
+    assert result["skipped_count"] == 1
     assert result["failed_count"] == 0
     assert result["tax_doc_ids"] == [1368668, 1368669]
+    assert result["current_step"] == "단순경비율 목록발송 완료 발송=1건 스킵=1건 실패=0건"
+
+
+def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_failed_and_continues(monkeypatch):
+    calls = []
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        return {
+            "ok": True,
+            "status": "session_active",
+            "count": 5,
+            "tax_doc_ids": [2001, 2002, 2003, 2004, 2005],
+        }
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+
+        if url.endswith("/api/tax/v1/taxdocs/2001/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith("/api/tax/v1/taxdocs/2001/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body == {
+                "calculationType": "ESTIMATE",
+                "submitAccountType": "CUSTOMER",
+            }
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+
+        if url.endswith("/api/tax/v1/taxdocs/2002/summary?isMasking=true"):
+            return {"ok": False, "status": 503, "json": None, "fetch_error": "network timeout"}
+
+        if url.endswith("/api/tax/v1/taxdocs/2003/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": False, "data": None, "error": {"message": "bad"}}}
+
+        if url.endswith("/api/tax/v1/taxdocs/2004/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True}}
+
+        if url.endswith("/api/tax/v1/taxdocs/2005/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith("/api/tax/v1/taxdocs/2005/expected-tax-amount/send"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "preview_expected_tax_send_targets", fake_preview_expected_tax_send_targets)
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_simple_expense_rate_expected_tax_amounts(bot_id="sender-01", payload={})
+
+    assert [
+        (call["method"], call["url"].split("/api/tax/v1/taxdocs/")[1])
+        for call in calls
+    ] == [
+        ("GET", "2001/summary?isMasking=true"),
+        ("POST", "2001/expected-tax-amount/send"),
+        ("GET", "2002/summary?isMasking=true"),
+        ("GET", "2003/summary?isMasking=true"),
+        ("GET", "2004/summary?isMasking=true"),
+        ("GET", "2005/summary?isMasking=true"),
+        ("POST", "2005/expected-tax-amount/send"),
+    ]
+    assert result["attempted_count"] == 5
+    assert result["sent_count"] == 2
+    assert result["skipped_count"] == 0
+    assert result["failed_count"] == 3
+    assert result["current_step"] == "단순경비율 목록발송 완료 발송=2건 스킵=0건 실패=3건"
+    assert [failure["tax_doc_id"] for failure in result["failures"]] == [2002, 2003, 2004]
 
 
 def test_send_bookkeeping_expected_tax_amount_calculates_extra_expense_then_posts_single_send(monkeypatch):
@@ -393,6 +479,34 @@ def test_rate_for_industry_code_rounds_generated_float_artifacts(monkeypatch):
 
     assert browser_control._rate_for_industry_code("TEST918") == browser_control.Decimal("0.918")
     assert browser_control._floor_money(1000 * browser_control._rate_for_industry_code("TEST918")) == 918
+
+
+def test_operator_requested_real_estate_industry_codes_use_2452_percent_rate():
+    requested_codes = (
+        "701101",
+        "701102",
+        "701103",
+        "701104",
+        "701201",
+        "701202",
+        "701203",
+        "701204",
+        "701205",
+        "701206",
+        "701300",
+        "701301",
+        "701302",
+        "701400",
+        "701501",
+        "701502",
+        "701503",
+        "701504",
+    )
+
+    assert {
+        code: browser_control._rate_for_industry_code(code)
+        for code in requested_codes
+    } == {code: browser_control.Decimal("0.2452") for code in requested_codes}
 
 
 def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and_logs_skip(
