@@ -1257,19 +1257,21 @@ def test_assign_taxdocs_to_current_accountant_dry_run_skips_fetch_and_put(monkey
     assert result["current_step"] == "잔여목록 배정 dry-run 2건"
 
 
-def test_submit_tax_reports_logs_failed_stage_skips_without_default_custom_type_and_cleans_completed_logs(monkeypatch, tmp_path):
+def test_submit_tax_reports_assigns_then_applies_minus_amount_corrections(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
     stale_log_path = tmp_path / "tax_report_submit_responses.jsonl"
     stale_summary_path = tmp_path / "tax_report_submit_failures.txt"
     stale_log_path.write_text(
-        browser_control.json.dumps({"tax_doc_id": 7, "stage": "national_tax", "old": True}, ensure_ascii=False) + "\n"
-        + browser_control.json.dumps({"tax_doc_id": 99, "stage": "national_tax", "old": True}, ensure_ascii=False) + "\n",
+        browser_control.json.dumps({"tax_doc_id": 10, "stage": "minus_amount_correction", "old": True}, ensure_ascii=False)
+        + "\n"
+        + browser_control.json.dumps({"tax_doc_id": 99, "stage": "minus_amount_correction", "old": True}, ensure_ascii=False)
+        + "\n",
         encoding="utf-8",
     )
     stale_summary_path.write_text(
-        "2026-01-01T00:00:00+00:00 | taxDocId=7 | 국세신고 실패 | status=400 | reason=old | customType=미설정 | bot=reporter-01 | run=old\n"
-        "2026-01-01T00:00:00+00:00 | taxDocId=99 | 국세신고 실패 | status=400 | reason=old | customType=미설정 | bot=reporter-01 | run=old\n",
+        "2026-01-01T00:00:00+00:00 | taxDocId=10 | 음수항목 보정 실패 | status=500 | reason=old | customType=미설정 | bot=reporter-01 | run=old\n"
+        "2026-01-01T00:00:00+00:00 | taxDocId=99 | 음수항목 보정 실패 | status=500 | reason=old | customType=미설정 | bot=reporter-01 | run=old\n",
         encoding="utf-8",
     )
 
@@ -1278,146 +1280,160 @@ def test_submit_tax_reports_logs_failed_stage_skips_without_default_custom_type_
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
-        assert headers["x-host"] == "GIT"
-        if "/custom-type" in url:
-            raise AssertionError("reporter failures should not set customType unless configured")
-
-        tax_doc_id = int(url.split("/taxdocs/")[1].split("/")[0])
-        if "/national-tax/report" in url:
-            assert method == "POST"
-            assert json_body == {"taxDocId": tax_doc_id}
-            if tax_doc_id == 4:
-                return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "national timeout"}}, "fetch_error": None}
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"nationalReceiptNo": f"N-{tax_doc_id}"}}}
-        if "/local-tax/report" in url:
-            assert method == "POST"
-            assert json_body == {"taxDocId": tax_doc_id}
-            if tax_doc_id == 5:
-                return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "local timeout"}}, "fetch_error": None}
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"localReceiptNo": f"L-{tax_doc_id}"}}}
-        if "/receipt/scrape" in url:
+        if url.endswith("/api/ta/v1/me"):
             assert method == "GET"
-            assert json_body is None
-            if tax_doc_id == 6:
-                return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "receipt missing"}}, "fetch_error": None}
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"receiptSaved": True}}}
-        assert "/report/complete" in url
-        assert method == "POST"
-        assert json_body == {"taxDocId": tax_doc_id}
-        return {"ok": True, "status": 200, "json": {"ok": True, "data": {"completed": True}}}
+            assert headers["x-host"] == "GROUND"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert method == "PUT"
+            assert headers["x-host"] == "GIT"
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [10, 11]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/10/business-incomes"):
+            assert method == "GET"
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "summary": {
+                            "itemList": [
+                                {"사업자번호": "000-00-00000"},
+                                {"사업자번호": "123-45-67890"},
+                            ]
+                        }
+                    },
+                },
+            }
+        if url.endswith("businessNumber=000-00-00000&businessIncomeType=PERSONAL"):
+            assert method == "POST"
+            return {
+                "ok": False,
+                "status": 400,
+                "json": {"ok": False, "error": {"message": "총 필요경비에 음수항목이 존재하지 않습니다."}},
+            }
+        if url.endswith("businessNumber=123-45-67890&businessIncomeType=BUSINESS"):
+            assert method == "POST"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/11/business-incomes"):
+            assert method == "GET"
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "summary": {
+                            "itemList": [
+                                {"사업자번호": "222-22-22222"},
+                            ]
+                        }
+                    },
+                },
+            }
+        if url.endswith("businessNumber=222-22-22222&businessIncomeType=BUSINESS"):
+            return {"ok": False, "status": 500, "json": {"ok": False, "error": {"message": "temporary failure"}}}
+
+        raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
     monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
 
     result = browser_control.submit_tax_reports(
         bot_id="reporter-01",
-        payload={
-            "tax_doc_ids": [7, 4, 6, 5],
-            "submit_path_template": "/api/tax/v1/taxdocs/{tax_doc_id}/national-tax/report",
-            "local_submit_path_template": "/api/tax/v1/taxdocs/{tax_doc_id}/local-tax/report",
-            "receipt_path_template": "/api/tax/v1/taxdocs/{tax_doc_id}/receipt/scrape",
-            "completion_path_template": "/api/tax/v1/taxdocs/{tax_doc_id}/report/complete",
-        },
+        payload={"tax_doc_ids": [11, 10]},
     )
 
-    non_custom_urls = [call["url"] for call in calls if "/custom-type" not in call["url"]]
-    assert non_custom_urls == [
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/4/national-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/5/national-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/5/local-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/6/national-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/6/local-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/6/receipt/scrape",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/7/national-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/7/local-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/7/receipt/scrape",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/7/report/complete",
+    assert [call["url"] for call in calls] == [
+        "https://ta-gw.3o3.co.kr/api/ta/v1/me",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/taxdocs/tax-accountants/assign",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/gross-incomes-prepaid-tax/10/business-incomes",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/bookkeeping/10/minus-amount/correction?businessNumber=000-00-00000&businessIncomeType=PERSONAL",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/bookkeeping/10/minus-amount/correction?businessNumber=123-45-67890&businessIncomeType=BUSINESS",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/gross-incomes-prepaid-tax/11/business-incomes",
+        "https://ta-gw.3o3.co.kr/api/tax/v1/gitax/bookkeeping/11/minus-amount/correction?businessNumber=222-22-22222&businessIncomeType=BUSINESS",
     ]
-    assert [call["url"] for call in calls if "/custom-type" in call["url"]] == []
-    assert result["attempted_count"] == 4
+    assert result["attempted_count"] == 2
     assert result["success_count"] == 1
-    assert result["skipped_count"] == 3
-    assert result["failed_count"] == 3
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["tax_doc_ids"] == [10, 11]
+    assert result["assigned_count"] == 2
+    assert result["tax_accountant_id"] == 817
     assert result["status"] == "manual_required"
-    assert result["tax_doc_ids"] == [4, 5, 6, 7]
-    assert result["current_step"] == "국세신고 응답수집 완료 성공=1건 패스=3건 실패=3건 공유로그=tax_report_submit_failures.txt 원본로그=tax_report_submit_responses.jsonl"
-    assert result["failure_summary_file"] == "tax_report_submit_failures.txt"
+    assert result["results"][0]["status"] == "completed"
+    assert result["results"][0]["business_numbers"] == ["000-00-00000", "123-45-67890"]
+    assert result["results"][1]["status"] == "skipped"
+    assert result["results"][1]["stage"] == "minus_amount_correction"
+    assert result["failures"][0]["tax_doc_id"] == 11
+    assert result["failures"][0]["stage"] == "minus_amount_correction"
 
     log_lines = [browser_control.json.loads(line) for line in stale_log_path.read_text(encoding="utf-8").splitlines()]
     assert [(line["tax_doc_id"], line["stage"]) for line in log_lines] == [
-        (99, "national_tax"),
-        (4, "national_tax"),
-        (5, "local_tax"),
-        (6, "receipt"),
+        (99, "minus_amount_correction"),
+        (11, "minus_amount_correction"),
     ]
-    assert log_lines[1]["response_json"]["error"]["message"] == "national timeout"
-    assert log_lines[2]["response_json"]["error"]["message"] == "local timeout"
-    assert log_lines[3]["response_json"]["error"]["message"] == "receipt missing"
-    assert [line.get("custom_type") for line in log_lines[1:]] == [None, None, None]
-    assert [line.get("custom_type_status_code") for line in log_lines[1:]] == [None, None, None]
-    assert [line.get("failure_reason") for line in log_lines[1:]] == [
-        "national timeout",
-        "local timeout",
-        "receipt missing",
-    ]
+    assert log_lines[1]["response_json"]["error"]["message"] == "temporary failure"
     assert "access-token" not in stale_log_path.read_text(encoding="utf-8")
 
     summary_lines = stale_summary_path.read_text(encoding="utf-8").splitlines()
-    assert "taxDocId=7" not in "\n".join(summary_lines)
+    assert "taxDocId=10" not in "\n".join(summary_lines)
     assert "taxDocId=99" in summary_lines[0]
-    assert "taxDocId=4 | 국세신고 실패 | status=400 | reason=national timeout | customType=미설정" in summary_lines[1]
-    assert "taxDocId=5 | 지방세신고 실패 | status=400 | reason=local timeout | customType=미설정" in summary_lines[2]
-    assert "taxDocId=6 | 접수증스크래핑 실패 | status=400 | reason=receipt missing | customType=미설정" in summary_lines[3]
+    assert "taxDocId=11 | 음수항목 보정 실패 | status=500 | reason=temporary failure | customType=미설정" in summary_lines[1]
 
 
-def test_submit_tax_reports_uses_configured_failure_custom_type(monkeypatch, tmp_path):
+def test_submit_tax_reports_marks_business_income_lookup_failure_and_continues(monkeypatch):
     calls = []
-    monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
 
     def fake_run_in_cdp_session(bot_id, payload, callback):
         return callback(FakePage(), 29301)
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
-        calls.append({"url": url, "method": method, "json_body": json_body})
-        if "/custom-type" in url:
-            assert method == "PUT"
-            assert json_body == {"customType": "보류"}
+        calls.append(url)
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
-        return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "later manual type"}}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/20/business-incomes"):
+            return {"ok": False, "status": 503, "json": None, "fetch_error": "network timeout"}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/21/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"summary": {"itemList": [{"사업자번호": "333-33-33333"}]}}},
+            }
+        if url.endswith("businessNumber=333-33-33333&businessIncomeType=BUSINESS"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
     monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
 
     result = browser_control.submit_tax_reports(
         bot_id="reporter-01",
-        payload={
-            "tax_doc_ids": [4],
-            "submit_path_template": "/api/tax/v1/taxdocs/{tax_doc_id}/national-tax/report",
-            "failure_custom_type": "보류",
-        },
+        payload={"tax_doc_ids": [20, 21]},
     )
 
-    assert result["skipped_count"] == 1
-    assert [call["url"] for call in calls] == [
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/4/national-tax/report",
-        "https://ta-gw.3o3.co.kr/api/tax/v1/taxdocs/4/custom-type",
-    ]
-    log_lines = [browser_control.json.loads(line) for line in (tmp_path / "tax_report_submit_responses.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert log_lines[0]["custom_type"] == "보류"
-    assert log_lines[0]["custom_type_status_code"] == 200
-    assert "customType=보류" in (tmp_path / "tax_report_submit_failures.txt").read_text(encoding="utf-8")
+    assert result["attempted_count"] == 2
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["failures"][0]["tax_doc_id"] == 20
+    assert result["failures"][0]["stage"] == "business_incomes"
+    assert result["failures"][0]["failure_reason"] == "fetch_error=network timeout"
 
 
-def test_submit_tax_reports_fails_closed_without_submit_url_template(monkeypatch):
-    monkeypatch.delenv("INCOME33_REPORT_SUBMIT_URL_TEMPLATE", raising=False)
-    monkeypatch.delenv("INCOME33_REPORT_SUBMIT_PATH_TEMPLATE", raising=False)
+def test_submit_tax_reports_no_targets_returns_session_active():
+    result = browser_control.submit_tax_reports(bot_id="reporter-01", payload={"tax_doc_ids": []})
 
-    try:
-        browser_control.submit_tax_reports(bot_id="reporter-01", payload={"tax_doc_ids": [1001]})
-    except ValueError as exc:
-        assert "report submit url template is required" in str(exc)
-    else:  # pragma: no cover - explicit assertion branch
-        raise AssertionError("missing report submit URL template should fail closed")
+    assert result["ok"] is True
+    assert result["status"] == "session_active"
+    assert result["attempted_count"] == 0
+    assert result["success_count"] == 0
+    assert result["failed_count"] == 0
+    assert result["current_step"] == "국세신고 준비 대상 없음"
 
 
 def test_submit_tax_reports_dry_run_does_not_post(monkeypatch):
@@ -1433,7 +1449,7 @@ def test_submit_tax_reports_dry_run_does_not_post(monkeypatch):
 
     assert result["dry_run"] is True
     assert result["attempted_count"] == 2
-    assert result["current_step"] == "국세신고 dry-run 2건"
+    assert result["current_step"] == "국세신고 준비 dry-run 2건"
 
 
 def test_send_expected_tax_amounts_rejects_invalid_tax_doc_ids(monkeypatch):

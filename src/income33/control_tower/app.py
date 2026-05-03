@@ -371,6 +371,7 @@ def create_app(
         request: Request,
         command: str,
         log_label: str,
+        extra_payload: dict[str, Any] | None = None,
     ) -> RedirectResponse:
         from urllib.parse import parse_qs
 
@@ -398,10 +399,13 @@ def create_app(
         tax_doc_ids = list(dict.fromkeys(tax_doc_ids))
 
         try:
+            payload_data: dict[str, Any] = {"tax_doc_ids": tax_doc_ids}
+            if extra_payload:
+                payload_data.update(extra_payload)
             app.state.service.queue_bot_command(
                 bot_id=bot_id,
                 command=command,
-                payload={"tax_doc_ids": tax_doc_ids},
+                payload=payload_data,
             )
         except KeyError as exc:
             logger.warning("%s_not_found bot_id=%s", log_label, bot_id)
@@ -427,6 +431,7 @@ def create_app(
             request=request,
             command="submit_tax_reports",
             log_label="queue_tax_report_submit_list",
+            extra_payload={"prepare_only": True},
         )
 
     @app.get("/api/agents/{pc_id}/commands/poll")
