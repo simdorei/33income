@@ -297,11 +297,36 @@ def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_condi
             assert method == "GET"
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
 
+        if url.endswith(
+            "/api/tax/v1/taxdocs/1368668/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            assert method == "GET"
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "종합소득세_납부_할_세액": 2079941,
+                        "지방소득세_납부_할_세액": 207994,
+                        "권장수수료": 88000,
+                    },
+                },
+            }
+
         if url.endswith("/api/tax/v1/taxdocs/1368668/expected-tax-amount/send"):
             assert method == "POST"
             assert json_body == {
                 "calculationType": "ESTIMATE",
                 "submitAccountType": "CUSTOMER",
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": 2079941,
+                "expectedLocalTaxAmount": 207994,
+                "submitFee": 88000,
+                "advisedFeeAmount": 88000,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
             }
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
 
@@ -327,6 +352,7 @@ def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_condi
     ] == [
         ("GET", "1368668/summary?isMasking=true"),
         ("GET", "1368669/summary?isMasking=true"),
+        ("GET", "1368668/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
         ("POST", "1368668/expected-tax-amount/send"),
     ]
     assert result["ok"] is True
@@ -359,11 +385,34 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
 
         if url.endswith("/api/tax/v1/taxdocs/2001/summary?isMasking=true"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith(
+            "/api/tax/v1/taxdocs/2001/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "종합소득세_납부_할_세액": 101,
+                        "지방소득세_납부_할_세액": 10,
+                        "권장수수료": 55,
+                    },
+                },
+            }
         if url.endswith("/api/tax/v1/taxdocs/2001/expected-tax-amount/send"):
             assert method == "POST"
             assert json_body == {
                 "calculationType": "ESTIMATE",
                 "submitAccountType": "CUSTOMER",
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": 101,
+                "expectedLocalTaxAmount": 10,
+                "submitFee": 55,
+                "advisedFeeAmount": 55,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
             }
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
 
@@ -378,8 +427,10 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
 
         if url.endswith("/api/tax/v1/taxdocs/2005/summary?isMasking=true"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
-        if url.endswith("/api/tax/v1/taxdocs/2005/expected-tax-amount/send"):
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+        if url.endswith(
+            "/api/tax/v1/taxdocs/2005/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            return {"ok": False, "status": 504, "json": None, "fetch_error": "gateway timeout"}
 
         raise AssertionError(f"unexpected url: {url}")
 
@@ -387,7 +438,10 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
     monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
 
-    result = browser_control.send_simple_expense_rate_expected_tax_amounts(bot_id="sender-01", payload={})
+    result = browser_control.send_simple_expense_rate_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"calculation_retry_count": 0, "calculation_retry_delay_seconds": 0},
+    )
 
     assert [
         (call["method"], call["url"].split("/api/tax/v1/taxdocs/")[1])
@@ -398,17 +452,102 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
         ("GET", "2003/summary?isMasking=true"),
         ("GET", "2004/summary?isMasking=true"),
         ("GET", "2005/summary?isMasking=true"),
+        ("GET", "2001/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
         ("POST", "2001/expected-tax-amount/send"),
-        ("POST", "2005/expected-tax-amount/send"),
+        ("GET", "2005/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
     ]
     assert result["attempted_count"] == 5
-    assert result["sent_count"] == 2
+    assert result["sent_count"] == 1
     assert result["skipped_count"] == 0
-    assert result["failed_count"] == 3
+    assert result["failed_count"] == 4
     assert result["eligible_tax_doc_ids"] == [2001, 2005]
-    assert result["sent_tax_doc_ids"] == [2001, 2005]
-    assert result["current_step"] == "단순경비율 목록발송 완료 발송=2건 스킵=0건 실패=3건"
-    assert [failure["tax_doc_id"] for failure in result["failures"]] == [2002, 2003, 2004]
+    assert result["sent_tax_doc_ids"] == [2001]
+    assert result["current_step"] == "단순경비율 목록발송 완료 발송=1건 스킵=0건 실패=4건"
+    assert [failure["tax_doc_id"] for failure in result["failures"]] == [2002, 2003, 2004, 2005]
+    assert result["failures"][-1]["stage"] == "calculation"
+    assert result["failures"][-1]["reason"] == "calculation_http_non_ok"
+
+
+def test_send_simple_expense_rate_expected_tax_amounts_retries_calculation_only(monkeypatch):
+    calls = []
+    calculation_attempt = {"count": 0}
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        return {
+            "ok": True,
+            "status": "session_active",
+            "count": 1,
+            "tax_doc_ids": [9101],
+        }
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+
+        if url.endswith("/api/tax/v1/taxdocs/9101/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+
+        if url.endswith(
+            "/api/tax/v1/taxdocs/9101/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            calculation_attempt["count"] += 1
+            if calculation_attempt["count"] == 1:
+                return {"ok": False, "status": 503, "json": None, "fetch_error": "temporary unavailable"}
+            if calculation_attempt["count"] == 2:
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "json": {
+                        "ok": True,
+                        "data": {
+                            "종합소득세_납부_할_세액": 777,
+                            "지방소득세_납부_할_세액": 77,
+                            "권장수수료": 33,
+                        },
+                    },
+                }
+
+        if url.endswith("/api/tax/v1/taxdocs/9101/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body == {
+                "calculationType": "ESTIMATE",
+                "submitAccountType": "CUSTOMER",
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": 777,
+                "expectedLocalTaxAmount": 77,
+                "submitFee": 33,
+                "advisedFeeAmount": 33,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
+            }
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "preview_expected_tax_send_targets", fake_preview_expected_tax_send_targets)
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_simple_expense_rate_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"calculation_retry_count": 2, "calculation_retry_delay_seconds": 0},
+    )
+
+    assert result["failed_count"] == 0
+    assert result["sent_count"] == 1
+    assert calculation_attempt["count"] == 2
+    assert [
+        (call["method"], call["url"].split("/api/tax/v1/taxdocs/")[1])
+        for call in calls
+    ] == [
+        ("GET", "9101/summary?isMasking=true"),
+        ("GET", "9101/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
+        ("GET", "9101/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
+        ("POST", "9101/expected-tax-amount/send"),
+    ]
 
 
 def test_send_simple_expense_rate_expected_tax_amounts_logs_failure_reasons(monkeypatch, caplog):
@@ -428,6 +567,21 @@ def test_send_simple_expense_rate_expected_tax_amounts_logs_failure_reasons(monk
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         if url.endswith("/api/tax/v1/taxdocs/4001/summary?isMasking=true"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith(
+            "/api/tax/v1/taxdocs/4001/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "종합소득세_납부_할_세액": 11,
+                        "지방소득세_납부_할_세액": 1,
+                        "권장수수료": 9,
+                    },
+                },
+            }
         if url.endswith("/api/tax/v1/taxdocs/4002/summary?isMasking=true"):
             return {
                 "ok": True,
@@ -519,13 +673,65 @@ def test_send_simple_expense_rate_collects_all_pages_then_summaries_then_sorted_
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
         if url.endswith("/api/tax/v1/taxdocs/3003/summary?isMasking=true"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith(
+            "/api/tax/v1/taxdocs/3002/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "종합소득세_납부_할_세액": 201,
+                        "지방소득세_납부_할_세액": 20,
+                        "권장수수료": 35,
+                    },
+                },
+            }
+        if url.endswith(
+            "/api/tax/v1/taxdocs/3003/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"
+        ):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "종합소득세_납부_할_세액": 301,
+                        "지방소득세_납부_할_세액": 30,
+                        "권장수수료": 45,
+                    },
+                },
+            }
         if url.endswith("/api/tax/v1/taxdocs/3002/expected-tax-amount/send"):
             assert method == "POST"
-            assert json_body == {"calculationType": "ESTIMATE", "submitAccountType": "CUSTOMER"}
+            assert json_body == {
+                "calculationType": "ESTIMATE",
+                "submitAccountType": "CUSTOMER",
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": 201,
+                "expectedLocalTaxAmount": 20,
+                "submitFee": 35,
+                "advisedFeeAmount": 35,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
+            }
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
         if url.endswith("/api/tax/v1/taxdocs/3003/expected-tax-amount/send"):
             assert method == "POST"
-            assert json_body == {"calculationType": "ESTIMATE", "submitAccountType": "CUSTOMER"}
+            assert json_body == {
+                "calculationType": "ESTIMATE",
+                "submitAccountType": "CUSTOMER",
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": 301,
+                "expectedLocalTaxAmount": 30,
+                "submitFee": 45,
+                "advisedFeeAmount": 45,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
+            }
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
 
         raise AssertionError(f"unexpected url: {url}")
@@ -552,7 +758,9 @@ def test_send_simple_expense_rate_collects_all_pages_then_summaries_then_sorted_
         ("GET", "3001/summary?isMasking=true"),
         ("GET", "3002/summary?isMasking=true"),
         ("GET", "3003/summary?isMasking=true"),
+        ("GET", "3002/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
         ("POST", "3002/expected-tax-amount/send"),
+        ("GET", "3003/expected-tax-amount/calculation/estimate?submitAccountType=CUSTOMER"),
         ("POST", "3003/expected-tax-amount/send"),
     ]
     assert result["tax_doc_ids"] == [3001, 3002, 3003]

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import webbrowser
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
@@ -1113,6 +1114,50 @@ def _is_retryable_report_transport_response(response: dict[str, Any]) -> bool:
     return status_code == 0 or status_code in {408, 425, 429} or 500 <= status_code <= 599
 
 
+def _fetch_with_retryable_transport(
+    *,
+    page: Any,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    max_retries: int,
+    retry_delay_seconds: float,
+    logger: logging.Logger,
+    log_context: dict[str, Any],
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    retries = max(0, int(max_retries))
+    for attempt_index in range(retries + 1):
+        response = _browser_fetch_json(
+            page,
+            url=url,
+            method=method,
+            headers=headers,
+            json_body=json_body,
+        )
+        is_last_attempt = attempt_index >= retries
+        if is_last_attempt or not _is_retryable_report_transport_response(response):
+            return response
+
+        logger.warning(
+            "%s_retry attempt=%s/%s status=%s fetch_error=%s",
+            str(log_context.get("event") or "browser_fetch"),
+            attempt_index + 1,
+            retries,
+            response.get("status"),
+            response.get("fetch_error"),
+            extra={
+                "tax_doc_id": log_context.get("tax_doc_id"),
+                "stage": log_context.get("stage"),
+                "url": url,
+            },
+        )
+        if retry_delay_seconds > 0:
+            time.sleep(retry_delay_seconds)
+
+    return {}
+
+
 def preview_expected_tax_send_targets(
     *,
     bot_id: str,
@@ -1864,6 +1909,21 @@ def send_simple_expense_rate_expected_tax_amounts(
         payload.get("submit_account_type") or payload.get("submitAccountType") or "CUSTOMER"
     ).strip().upper()
     calculation_type = str(payload.get("calculation_type") or payload.get("calculationType") or "ESTIMATE").strip().upper()
+    raw_calculation_retry_count = payload.get("calculation_retry_count")
+    if raw_calculation_retry_count is None:
+        raw_calculation_retry_count = payload.get("calculationRetryCount")
+    if raw_calculation_retry_count is None:
+        raw_calculation_retry_count = _env_int("INCOME33_SIMPLE_EXPENSE_RATE_CALCULATION_RETRY_COUNT", 2)
+    calculation_retry_count = max(0, int(raw_calculation_retry_count))
+
+    raw_calculation_retry_delay_seconds = payload.get("calculation_retry_delay_seconds")
+    if raw_calculation_retry_delay_seconds is None:
+        raw_calculation_retry_delay_seconds = payload.get("calculationRetryDelaySeconds")
+    if raw_calculation_retry_delay_seconds is None:
+        raw_calculation_retry_delay_seconds = os.getenv("INCOME33_SIMPLE_EXPENSE_RATE_CALCULATION_RETRY_DELAY_SECONDS")
+    if raw_calculation_retry_delay_seconds is None or str(raw_calculation_retry_delay_seconds).strip() == "":
+        raw_calculation_retry_delay_seconds = 1
+    calculation_retry_delay_seconds = max(0.0, float(raw_calculation_retry_delay_seconds))
 
     send_body = {
         "calculationType": calculation_type,
@@ -1976,13 +2036,116 @@ def send_simple_expense_rate_expected_tax_amounts(
             key=lambda tax_doc_id: original_order.get(int(tax_doc_id), len(original_order)),
         )
         for normalized_tax_doc_id in eligible_tax_doc_ids:
+            calculation_query = urlencode({"submitAccountType": submit_account_type})
+            calculation_url = (
+                f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/expected-tax-amount/calculation/estimate"
+                f"?{calculation_query}"
+            )
+            calculation_response = _fetch_with_retryable_transport(
+                page=page,
+                url=calculation_url,
+                method="GET",
+                headers=headers,
+                max_retries=calculation_retry_count,
+                retry_delay_seconds=calculation_retry_delay_seconds,
+                logger=logger,
+                log_context={
+                    "event": "simple_expense_calculation",
+                    "tax_doc_id": normalized_tax_doc_id,
+                    "stage": "calculation",
+                },
+            )
+            calculation_json = calculation_response.get("json")
+            if not calculation_response.get("ok"):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "calculation",
+                        "reason": "calculation_http_non_ok",
+                        "status": calculation_response.get("status"),
+                        "fetch_error": calculation_response.get("fetch_error"),
+                        "error": None,
+                        "response_text": calculation_response.get("text"),
+                    }
+                )
+                continue
+            if not isinstance(calculation_json, dict) or not calculation_json.get("ok"):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "calculation",
+                        "reason": "calculation_json_non_ok",
+                        "status": calculation_response.get("status"),
+                        "fetch_error": calculation_response.get("fetch_error"),
+                        "error": calculation_json.get("error") if isinstance(calculation_json, dict) else None,
+                        "response_text": calculation_response.get("text"),
+                    }
+                )
+                continue
+
+            calculation_data = calculation_json.get("data")
+            if not isinstance(calculation_data, dict):
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "calculation",
+                        "reason": "calculation_data_missing",
+                        "status": calculation_response.get("status"),
+                        "fetch_error": calculation_response.get("fetch_error"),
+                        "error": calculation_json.get("error"),
+                        "response_text": calculation_response.get("text"),
+                    }
+                )
+                continue
+
+            try:
+                expected_tax_amount = _required_int_field(
+                    calculation_data,
+                    "종합소득세_납부_할_세액",
+                    label="종합소득세_납부_할_세액",
+                )
+                expected_local_tax_amount = _required_int_field(
+                    calculation_data,
+                    "지방소득세_납부_할_세액",
+                    label="지방소득세_납부_할_세액",
+                )
+                advised_fee_amount = _required_int_field(
+                    calculation_data,
+                    "권장수수료",
+                    label="권장수수료",
+                )
+            except Exception as calc_exc:
+                failures.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "stage": "calculation",
+                        "reason": "calculation_data_invalid",
+                        "status": calculation_response.get("status"),
+                        "fetch_error": calculation_response.get("fetch_error"),
+                        "error": str(calc_exc),
+                        "response_text": calculation_response.get("text"),
+                    }
+                )
+                continue
+
+            tax_doc_send_body = {
+                **send_body,
+                "추가_경비_인정액": 0,
+                "expectedTaxAmount": expected_tax_amount,
+                "expectedLocalTaxAmount": expected_local_tax_amount,
+                "submitFee": advised_fee_amount,
+                "advisedFeeAmount": advised_fee_amount,
+                "isCustomReview": False,
+                "isTimeDiscount": False,
+                "timeDiscountFee": None,
+            }
             send_url = f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/expected-tax-amount/send"
             send_response = _browser_fetch_json(
                 page,
                 url=send_url,
                 method="POST",
                 headers=headers,
-                json_body=send_body,
+                json_body=tax_doc_send_body,
             )
             send_json = send_response.get("json") or {}
             result_data = send_json.get("data")
