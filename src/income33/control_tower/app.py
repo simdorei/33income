@@ -112,18 +112,8 @@ def _bot_actions_html(bot_id: str) -> str:
         _command_button(bot_id, "open_login", "로그인 열기", "login"),
         _command_button(bot_id, "fill_login", "로그인 입력", "login"),
         _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
-        _command_button(bot_id, "preview_send_targets", "목록조회 테스트", "refresh"),
     ]
     if bot_id.startswith("sender-"):
-        buttons.append(
-            _command_button(
-                bot_id,
-                "send_expected_tax_amounts",
-                "계산발송",
-                "send",
-                "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?",
-            )
-        )
         buttons.append(_rate_based_bookkeeping_form(bot_id))
         buttons.append(_taxdoc_id_list_send_form(bot_id))
         buttons.append(

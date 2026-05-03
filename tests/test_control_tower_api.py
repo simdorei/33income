@@ -136,15 +136,15 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "로그인 입력" in root.text
     assert "인증코드 제출" in root.text
     assert "새로고침" in root.text
-    assert "목록조회 테스트" in root.text
-    assert "계산발송" in root.text
+    assert "목록조회 테스트" not in root.text
+    assert "ID목록 경비율 장부발송" in root.text
     assert "일괄세션 확인" in root.text
     assert "일괄 계산발송 시작" in root.text
     assert "content='5'" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
-    assert "/ui/bots/sender-01/commands/preview_send_targets" in root.text
-    assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/commands/preview_send_targets" not in root.text
+    assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" not in root.text
     assert "/ui/bots/sender-01/send-expected-tax-amounts-list" in root.text
     assert "name='tax_doc_ids'" in root.text
     assert "<textarea" in root.text
