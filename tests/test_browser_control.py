@@ -106,6 +106,51 @@ def test_preview_send_targets_scans_all_pages_reverse_by_default(monkeypatch):
     assert result["current_step"] == "목록조회 테스트 45/45건 역순 3→1/3페이지 총 3페이지 officeId=325"
 
 
+def test_preview_send_targets_selects_office_id_from_sender_bot_index(monkeypatch):
+    filter_search_queries = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None):
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": [{"id": 325}, {"id": 326}, {"id": 327}, {"id": 328}, {"id": 329}],
+                },
+            }
+
+        assert "/api/tax/v1/taxdocs/filter-search" in url
+        filter_search_queries.append(parse_qs(urlparse(url).query))
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "content": [],
+                    "totalElements": 0,
+                    "totalPages": 1,
+                },
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.preview_expected_tax_send_targets(
+        bot_id="sender-05",
+        payload={"year": 2025, "size": 20, "scan_order": "forward"},
+    )
+
+    assert result["office_id"] == 329
+    assert result["office_index"] == 4
+    assert filter_search_queries[0]["officeId"] == ["329"]
+
+
 def test_send_expected_tax_amounts_posts_selected_tax_doc_ids(monkeypatch):
     calls = []
 
@@ -232,6 +277,7 @@ def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_condi
         assert payload["apply_expense_rate_type_filter"] == "SIMPLIFIED_EXPENSE_RATE"
         assert payload["tax_doc_custom_type_filter"] == "NONE"
         assert payload["direction"] == "ASC"
+        assert payload["scan_order"] == "forward"
         return {
             "ok": True,
             "status": "session_active",
@@ -280,8 +326,8 @@ def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_condi
         for call in calls
     ] == [
         ("GET", "1368668/summary?isMasking=true"),
-        ("POST", "1368668/expected-tax-amount/send"),
         ("GET", "1368669/summary?isMasking=true"),
+        ("POST", "1368668/expected-tax-amount/send"),
     ]
     assert result["ok"] is True
     assert result["attempted_count"] == 2
@@ -289,6 +335,8 @@ def test_send_simple_expense_rate_expected_tax_amounts_checks_summary_then_condi
     assert result["skipped_count"] == 1
     assert result["failed_count"] == 0
     assert result["tax_doc_ids"] == [1368668, 1368669]
+    assert result["eligible_tax_doc_ids"] == [1368668]
+    assert result["sent_tax_doc_ids"] == [1368668]
     assert result["current_step"] == "단순경비율 목록발송 완료 발송=1건 스킵=1건 실패=0건"
 
 
@@ -346,19 +394,115 @@ def test_send_simple_expense_rate_expected_tax_amounts_marks_summary_errors_as_f
         for call in calls
     ] == [
         ("GET", "2001/summary?isMasking=true"),
-        ("POST", "2001/expected-tax-amount/send"),
         ("GET", "2002/summary?isMasking=true"),
         ("GET", "2003/summary?isMasking=true"),
         ("GET", "2004/summary?isMasking=true"),
         ("GET", "2005/summary?isMasking=true"),
+        ("POST", "2001/expected-tax-amount/send"),
         ("POST", "2005/expected-tax-amount/send"),
     ]
     assert result["attempted_count"] == 5
     assert result["sent_count"] == 2
     assert result["skipped_count"] == 0
     assert result["failed_count"] == 3
+    assert result["eligible_tax_doc_ids"] == [2001, 2005]
+    assert result["sent_tax_doc_ids"] == [2001, 2005]
     assert result["current_step"] == "단순경비율 목록발송 완료 발송=2건 스킵=0건 실패=3건"
     assert [failure["tax_doc_id"] for failure in result["failures"]] == [2002, 2003, 2004]
+
+
+def test_send_simple_expense_rate_collects_all_pages_then_summaries_then_sorted_sends(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": [{"id": 325}, {"id": 329}]},
+            }
+
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query["officeId"] == ["329"]
+            assert query["workflowFilterSet"] == ["REVIEW_WAITING"]
+            assert query["taxDocCustomTypeFilter"] == ["NONE"]
+            assert query["applyExpenseRateTypeFilter"] == ["SIMPLIFIED_EXPENSE_RATE"]
+            assert query["taxDocServiceCodeTypeFilter"] == ["C0"]
+            assert query["year"] == ["2025"]
+            assert query["sort"] == ["REVIEW_REQUEST_DATE_TIME"]
+            assert query["direction"] == ["ASC"]
+            assert query["size"] == ["2"]
+            page_index = int(query["page"][0])
+            content_by_page = {
+                0: [{"taxDocId": 3001}, {"taxDocId": 3002}],
+                1: [{"taxDocId": 3003}],
+            }
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "content": content_by_page[page_index],
+                        "totalElements": 3,
+                        "totalPages": 2,
+                    },
+                },
+            }
+
+        if url.endswith("/api/tax/v1/taxdocs/3001/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": [{"id": 1}]}}}
+        if url.endswith("/api/tax/v1/taxdocs/3002/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith("/api/tax/v1/taxdocs/3003/summary?isMasking=true"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"taxDocTaxRayList": []}}}
+        if url.endswith("/api/tax/v1/taxdocs/3002/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body == {"calculationType": "ESTIMATE", "submitAccountType": "CUSTOMER"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+        if url.endswith("/api/tax/v1/taxdocs/3003/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body == {"calculationType": "ESTIMATE", "submitAccountType": "CUSTOMER"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}}}
+
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_simple_expense_rate_expected_tax_amounts(
+        bot_id="sender-02",
+        payload={"year": 2025, "size": 2},
+    )
+
+    taxdoc_calls = [
+        call
+        for call in calls
+        if "/api/tax/v1/taxdocs/filter-search" in call["url"] or "/api/tax/v1/taxdocs/" in call["url"]
+    ]
+    assert [
+        (call["method"], call["url"].split("/api/tax/v1/taxdocs/")[1])
+        for call in taxdoc_calls
+    ] == [
+        ("GET", "filter-search?officeId=329&workflowFilterSet=REVIEW_WAITING&assignmentStatusFilter=ALL&taxDocCustomTypeFilter=NONE&businessIncomeTypeFilter=ALL&freelancerIncomeAmountTypeFilter=ALL&reviewTypeFilter=ALL&submitGuideTypeFilter=ALL&applyExpenseRateTypeFilter=SIMPLIFIED_EXPENSE_RATE&noticeTypeFilter=ALL&extraSurveyTypeFilter=ALL&expectedTaxAmountTypeFilter=ALL&freeReasonTypeFilter=ALL&refundStatusFilter=ALL&taxDocServiceCodeTypeFilter=C0&year=2025&sort=REVIEW_REQUEST_DATE_TIME&direction=ASC&page=0&size=2"),
+        ("GET", "filter-search?officeId=329&workflowFilterSet=REVIEW_WAITING&assignmentStatusFilter=ALL&taxDocCustomTypeFilter=NONE&businessIncomeTypeFilter=ALL&freelancerIncomeAmountTypeFilter=ALL&reviewTypeFilter=ALL&submitGuideTypeFilter=ALL&applyExpenseRateTypeFilter=SIMPLIFIED_EXPENSE_RATE&noticeTypeFilter=ALL&extraSurveyTypeFilter=ALL&expectedTaxAmountTypeFilter=ALL&freeReasonTypeFilter=ALL&refundStatusFilter=ALL&taxDocServiceCodeTypeFilter=C0&year=2025&sort=REVIEW_REQUEST_DATE_TIME&direction=ASC&page=1&size=2"),
+        ("GET", "3001/summary?isMasking=true"),
+        ("GET", "3002/summary?isMasking=true"),
+        ("GET", "3003/summary?isMasking=true"),
+        ("POST", "3002/expected-tax-amount/send"),
+        ("POST", "3003/expected-tax-amount/send"),
+    ]
+    assert result["tax_doc_ids"] == [3001, 3002, 3003]
+    assert result["eligible_tax_doc_ids"] == [3002, 3003]
+    assert result["sent_tax_doc_ids"] == [3002, 3003]
+    assert result["sent_count"] == 2
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 0
 
 
 def test_send_bookkeeping_expected_tax_amount_calculates_extra_expense_then_posts_single_send(monkeypatch):

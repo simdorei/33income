@@ -570,6 +570,136 @@ def _resolve_taxdoc_page_size(payload: dict[str, Any] | None = None) -> int:
     return max(1, min(100, _env_int("INCOME33_TAXDOC_PAGE_SIZE", 20)))
 
 
+def _positive_int_or_none(value: Any, *, field_name: str) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
+
+
+def _non_negative_int_or_none(value: Any, *, field_name: str) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return parsed
+
+
+def _bot_slot_zero_based_index(bot_id: str) -> int | None:
+    match = re.search(r"-(\d+)$", str(bot_id or ""))
+    if not match:
+        return None
+    slot_number = int(match.group(1))
+    if slot_number <= 0:
+        return None
+    return slot_number - 1
+
+
+def _office_id_from_row(row: Any) -> int:
+    if not isinstance(row, dict):
+        raise RuntimeError("office lookup returned invalid office row")
+    raw_office_id = row.get("id") if row.get("id") is not None else row.get("officeId")
+    office_id = _positive_int_or_none(raw_office_id, field_name="office_id")
+    if office_id is None:
+        raise RuntimeError("office lookup row is missing office id")
+    return office_id
+
+
+def _payload_value(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    return None
+
+
+def _payload_or_env_value(payload: dict[str, Any], payload_keys: tuple[str, ...], env_names: tuple[str, ...]) -> Any:
+    payload_value = _payload_value(payload, *payload_keys)
+    if payload_value is not None and payload_value != "":
+        return payload_value
+    for env_name in env_names:
+        env_value = os.getenv(env_name)
+        if env_value is not None and env_value != "":
+            return env_value
+    return None
+
+
+def _resolve_tax_office_selection(
+    *,
+    offices: list[Any],
+    payload: dict[str, Any],
+    bot_id: str,
+) -> tuple[int, int | None]:
+    """Resolve officeId from explicit override or the current sender bot's office index.
+
+    NewTA sessions can expose multiple offices from `/tax-offices/simple`.  The
+    normal sender fleet mapping is sender-01 -> offices[0], sender-02 ->
+    offices[1], and so on.  This keeps officeId tied to the bot's own slot
+    rather than accidentally always using the first office in the logged-in
+    account.
+    """
+    explicit_office_id = _positive_int_or_none(
+        _payload_or_env_value(
+            payload,
+            ("office_id", "officeId"),
+            ("INCOME33_TAXDOC_OFFICE_ID",),
+        ),
+        field_name="office_id",
+    )
+    if explicit_office_id is not None:
+        selected_index = None
+        for index, office in enumerate(offices):
+            try:
+                if _office_id_from_row(office) == explicit_office_id:
+                    selected_index = index
+                    break
+            except RuntimeError:
+                continue
+        return explicit_office_id, selected_index
+
+    explicit_zero_based_index = _non_negative_int_or_none(
+        _payload_or_env_value(
+            payload,
+            ("office_index", "officeIndex", "tax_office_index", "taxOfficeIndex"),
+            ("INCOME33_TAXDOC_OFFICE_INDEX", "INCOME33_TAX_OFFICE_INDEX"),
+        ),
+        field_name="office_index",
+    )
+    explicit_one_based_number = _positive_int_or_none(
+        _payload_or_env_value(
+            payload,
+            ("office_number", "officeNumber", "tax_office_number", "taxOfficeNumber"),
+            ("INCOME33_TAXDOC_OFFICE_NUMBER", "INCOME33_TAX_OFFICE_NUMBER"),
+        ),
+        field_name="office_number",
+    )
+    if explicit_zero_based_index is not None and explicit_one_based_number is not None:
+        raise ValueError("set only one of office_index or office_number")
+
+    if explicit_zero_based_index is not None:
+        office_index = explicit_zero_based_index
+    elif explicit_one_based_number is not None:
+        office_index = explicit_one_based_number - 1
+    else:
+        office_index = _bot_slot_zero_based_index(bot_id)
+        if office_index is None:
+            office_index = 0
+
+    if office_index >= len(offices):
+        if len(offices) == 1 and explicit_zero_based_index is None and explicit_one_based_number is None:
+            office_index = 0
+        else:
+            raise RuntimeError(f"office index out of range index={office_index} offices={len(offices)} bot_id={bot_id}")
+
+    return _office_id_from_row(offices[office_index]), office_index
+
+
 def _taxdoc_filter_search_url(
     *,
     api_base_url: str,
@@ -1044,7 +1174,11 @@ def preview_expected_tax_send_targets(
         offices = office_json.get("data") or []
         if not offices:
             raise RuntimeError("office lookup returned no offices")
-        office_id = int(payload.get("office_id") or offices[0]["id"])
+        office_id, office_index = _resolve_tax_office_selection(
+            offices=list(offices),
+            payload=payload,
+            bot_id=bot_id,
+        )
 
         def _fetch_taxdoc_page(target_page_index: int) -> dict[str, Any]:
             list_url = _taxdoc_filter_search_url(
@@ -1131,6 +1265,7 @@ def preview_expected_tax_send_targets(
             "current_step": current_step,
             "debug_port": debug_port,
             "office_id": office_id,
+            "office_index": office_index,
             "year": year,
             "page": page_index,
             "scan_order": scan_order,
@@ -1649,6 +1784,7 @@ def send_simple_expense_rate_expected_tax_amounts(
         preview_payload.setdefault("apply_expense_rate_type_filter", "SIMPLIFIED_EXPENSE_RATE")
         preview_payload.setdefault("tax_doc_custom_type_filter", "NONE")
         preview_payload.setdefault("direction", "ASC")
+        preview_payload.setdefault("scan_order", "forward")
         preview = preview_expected_tax_send_targets(
             bot_id=bot_id,
             payload=preview_payload,
@@ -1714,8 +1850,13 @@ def send_simple_expense_rate_expected_tax_amounts(
 
         failures: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        sent_count = 0
+        eligible_tax_doc_ids: list[int] = []
+        sent_tax_doc_ids: list[int] = []
 
+        # Phase 1: first inspect every candidate summary.  Do not send while
+        # still discovering candidates; this guarantees that all filter-search
+        # pages have been collected and every taxRay gate has been evaluated
+        # before any expected-tax send side effect is attempted.
         for tax_doc_id in tax_doc_ids:
             normalized_tax_doc_id = int(tax_doc_id)
             summary_url = f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/summary?isMasking=true"
@@ -1793,6 +1934,16 @@ def send_simple_expense_rate_expected_tax_amounts(
                 )
                 continue
 
+            eligible_tax_doc_ids.append(normalized_tax_doc_id)
+
+        # Phase 2: send only the taxRay-empty set, preserving the filter-search
+        # sort order (REVIEW_REQUEST_DATE_TIME ASC for this command).
+        original_order = {int(tax_doc_id): index for index, tax_doc_id in enumerate(tax_doc_ids)}
+        eligible_tax_doc_ids = sorted(
+            eligible_tax_doc_ids,
+            key=lambda tax_doc_id: original_order.get(int(tax_doc_id), len(original_order)),
+        )
+        for normalized_tax_doc_id in eligible_tax_doc_ids:
             send_url = f"{api_base_url}/api/tax/v1/taxdocs/{normalized_tax_doc_id}/expected-tax-amount/send"
             send_response = _browser_fetch_json(
                 page,
@@ -1805,7 +1956,7 @@ def send_simple_expense_rate_expected_tax_amounts(
             result_data = send_json.get("data")
             result_ok = result_data.get("result") is True if isinstance(result_data, dict) else result_data is True
             if send_response.get("ok") and send_json.get("ok") and result_ok:
-                sent_count += 1
+                sent_tax_doc_ids.append(normalized_tax_doc_id)
                 continue
 
             failures.append(
@@ -1820,6 +1971,7 @@ def send_simple_expense_rate_expected_tax_amounts(
                 }
             )
 
+        sent_count = len(sent_tax_doc_ids)
         failed_count = len(failures)
         skipped_count = len(skipped)
         return {
@@ -1834,6 +1986,8 @@ def send_simple_expense_rate_expected_tax_amounts(
             "skipped_count": skipped_count,
             "failed_count": failed_count,
             "tax_doc_ids": tax_doc_ids,
+            "eligible_tax_doc_ids": eligible_tax_doc_ids,
+            "sent_tax_doc_ids": sent_tax_doc_ids,
             "failures": failures,
             "skipped": skipped,
             "send_body": send_body,
