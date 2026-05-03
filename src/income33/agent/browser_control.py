@@ -720,7 +720,7 @@ def _taxdoc_filter_search_url(
         "taxDocCustomTypeFilter": tax_doc_custom_type_filter,
         "businessIncomeTypeFilter": "ALL",
         "freelancerIncomeAmountTypeFilter": "ALL",
-        "reviewTypeFilter": "ALL",
+        "reviewTypeFilter": "NORMAL",
         "submitGuideTypeFilter": "ALL",
         "applyExpenseRateTypeFilter": apply_expense_rate_type_filter,
         "noticeTypeFilter": "ALL",
