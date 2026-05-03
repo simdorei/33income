@@ -33,6 +33,9 @@ def test_command_policy_centralizes_dashboard_allowlist_and_sender_only_guardrai
     allowed = dashboard_allowed_commands()
     assert "open_login" in allowed
     assert "send_expected_tax_amounts" in allowed
+    assert "preview_send_targets" not in allowed
+    assert "preview_rate_based_bookkeeping_expected_tax_amounts" not in allowed
+    assert "send_rate_based_bookkeeping_expected_tax_amounts" not in allowed
     assert "submit_auth_code" not in allowed
 
     assert get_command_policy("send_expected_tax_amounts").sender_only is True
@@ -137,19 +140,24 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "인증코드 제출" in root.text
     assert "새로고침" in root.text
     assert "목록조회 테스트" not in root.text
+    assert "계산발송</button>" in root.text
+    assert "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?" in root.text
     assert "ID목록 경비율 장부발송" in root.text
-    assert "일괄세션 확인" in root.text
-    assert "일괄 계산발송 시작" in root.text
+    assert "일괄세션 확인" not in root.text
+    assert "일괄 계산발송 시작" not in root.text
     assert "content='5'" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" not in root.text
-    assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" not in root.text
-    assert "/ui/bots/sender-01/send-expected-tax-amounts-list" in root.text
-    assert "name='tax_doc_ids'" in root.text
+    assert "/ui/bots/sender-01/commands/send_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/send-expected-tax-amounts-list" not in root.text
+    assert "/ui/bots/sender-01/rate-based-bookkeeping-send-list" in root.text
+    assert "/ui/bots/sender-01/rate-based-bookkeeping-send'" not in root.text
+    assert root.text.count("name='tax_doc_ids'") == 9
+    assert "name='tax_doc_id'" not in root.text
     assert "<textarea" in root.text
-    assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" in root.text
-    assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" in root.text
+    assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
+    assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "return confirm" in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
     assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
@@ -380,12 +388,30 @@ def test_dashboard_can_queue_login_command(tmp_path):
     assert commands[0]["command"] == "open_login"
 
 
-def test_dashboard_can_queue_rate_based_bookkeeping_command(tmp_path):
+def test_dashboard_rejects_hidden_auto_bulk_buttons_by_direct_ui_route(tmp_path):
+    client = build_client(tmp_path)
+
+    for command in (
+        "preview_send_targets",
+        "preview_rate_based_bookkeeping_expected_tax_amounts",
+        "send_rate_based_bookkeeping_expected_tax_amounts",
+    ):
+        response = client.post(
+            f"/ui/bots/sender-01/commands/{command}",
+            follow_redirects=False,
+        )
+        assert response.status_code == 400
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    assert polled.json()["commands"] == []
+
+
+def test_dashboard_can_queue_repeated_send_expected_tax_amounts_command(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
-        "/ui/bots/sender-01/rate-based-bookkeeping-send",
-        data={"tax_doc_id": "1348568"},
+        "/ui/bots/sender-01/commands/send_expected_tax_amounts",
         follow_redirects=False,
     )
 
@@ -394,15 +420,45 @@ def test_dashboard_can_queue_rate_based_bookkeeping_command(tmp_path):
     assert polled.status_code == 200
     commands = polled.json()["commands"]
     assert len(commands) == 1
-    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
-    assert '"tax_doc_ids": [1348568]' in commands[0]["payload_json"]
+    assert commands[0]["command"] == "send_expected_tax_amounts"
+    assert commands[0]["payload_json"] == '{"_retry": {"interval_sec": 300, "max_attempts": 3}}'
 
 
-def test_dashboard_can_queue_send_expected_tax_amounts_from_taxdoc_id_list(tmp_path):
+def test_dashboard_rejects_removed_taxdoc_id_list_expected_tax_route(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
         "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        data={"tax_doc_ids": "1360165"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 404
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    assert polled.json()["commands"] == []
+
+
+def test_dashboard_single_taxdoc_rate_based_bookkeeping_route_is_removed(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/rate-based-bookkeeping-send",
+        data={"tax_doc_id": "1348568"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 404
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    assert polled.json()["commands"] == []
+
+
+def test_dashboard_can_queue_rate_based_bookkeeping_from_taxdoc_id_list(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
         data={"tax_doc_ids": "1360165, 1360166\n1360165 1360167"},
         follow_redirects=False,
     )
@@ -420,7 +476,7 @@ def test_dashboard_rejects_invalid_taxdoc_id_list(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
-        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
         data={"tax_doc_ids": "1360165,abc"},
         follow_redirects=False,
     )
@@ -434,7 +490,7 @@ def test_dashboard_rejects_non_positive_taxdoc_id_list(tmp_path):
 
     for raw_value in ("0", "-1", "1.2"):
         response = client.post(
-            "/ui/bots/sender-01/send-expected-tax-amounts-list",
+            "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
             data={"tax_doc_ids": raw_value},
             follow_redirects=False,
         )
@@ -448,7 +504,7 @@ def test_dashboard_rejects_too_many_taxdoc_ids(tmp_path):
 
     many_ids = ",".join(str(1000000 + i) for i in range(501))
     response = client.post(
-        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
         data={"tax_doc_ids": many_ids},
         follow_redirects=False,
     )
@@ -461,7 +517,7 @@ def test_dashboard_rejects_empty_taxdoc_id_list(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
-        "/ui/bots/sender-01/send-expected-tax-amounts-list",
+        "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
         data={"tax_doc_ids": "   "},
         follow_redirects=False,
     )

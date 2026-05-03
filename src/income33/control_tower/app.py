@@ -77,28 +77,15 @@ def _submit_auth_code_form(bot_id: str) -> str:
     )
 
 
-def _rate_based_bookkeeping_form(bot_id: str) -> str:
+def _taxdoc_id_list_rate_based_bookkeeping_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
     return (
-        f"<form method='post' action='/ui/bots/{safe_bot_id}/rate-based-bookkeeping-send' "
-        "class='inline-form' style='display:inline'>"
-        "<input type='number' name='tax_doc_id' placeholder='taxDocId' min='1' required />"
-        "<button type='submit' class='send' "
-        "onclick=\"return confirm('taxDocId 기준 경비율 장부 계산발송을 진행할까요?')\">"
-        "경비율 장부발송</button>"
-        "</form>"
-    )
-
-
-def _taxdoc_id_list_send_form(bot_id: str) -> str:
-    safe_bot_id = escape(bot_id, quote=True)
-    return (
-        f"<form method='post' action='/ui/bots/{safe_bot_id}/send-expected-tax-amounts-list' "
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/rate-based-bookkeeping-send-list' "
         "class='inline-form' style='display:inline'>"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
         "placeholder='taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 경비율 장부 계산발송(개별 순차)을 진행할까요?')\">"
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 ID목록 경비율 장부발송(개별 순차)을 진행할까요?')\">"
         "ID목록 경비율 장부발송</button>"
         "</form>"
     )
@@ -114,25 +101,16 @@ def _bot_actions_html(bot_id: str) -> str:
         _command_button(bot_id, "refresh_page", "새로고침", "refresh"),
     ]
     if bot_id.startswith("sender-"):
-        buttons.append(_rate_based_bookkeeping_form(bot_id))
-        buttons.append(_taxdoc_id_list_send_form(bot_id))
         buttons.append(
             _command_button(
                 bot_id,
-                "preview_rate_based_bookkeeping_expected_tax_amounts",
-                "일괄세션 확인",
-                "refresh",
-            )
-        )
-        buttons.append(
-            _command_button(
-                bot_id,
-                "send_rate_based_bookkeeping_expected_tax_amounts",
-                "일괄 계산발송 시작",
+                "send_expected_tax_amounts",
+                "계산발송",
                 "send",
-                "TA 목록을 조회한 뒤 각 taxDocId별 경비율 장부 계산발송을 진행합니다. 진행할까요?",
+                "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?",
             )
         )
+        buttons.append(_taxdoc_id_list_rate_based_bookkeeping_form(bot_id))
     buttons.extend(
         [
             _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
@@ -362,34 +340,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 
-    @app.post("/ui/bots/{bot_id}/rate-based-bookkeeping-send")
-    async def queue_rate_based_bookkeeping_send(bot_id: str, request: Request) -> RedirectResponse:
-        from urllib.parse import parse_qs
-
-        raw_body = (await request.body()).decode("utf-8", errors="ignore")
-        raw_tax_doc_id = parse_qs(raw_body).get("tax_doc_id", [""])[0].strip()
-        try:
-            tax_doc_id = int(raw_tax_doc_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="tax_doc_id must be a positive integer") from exc
-        if tax_doc_id <= 0:
-            raise HTTPException(status_code=400, detail="tax_doc_id must be a positive integer")
-        try:
-            app.state.service.queue_bot_command(
-                bot_id=bot_id,
-                command="send_rate_based_bookkeeping_expected_tax_amounts",
-                payload={"tax_doc_ids": [tax_doc_id]},
-            )
-        except KeyError as exc:
-            logger.warning("queue_rate_based_bookkeeping_not_found bot_id=%s", bot_id)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            logger.warning("queue_rate_based_bookkeeping_rejected bot_id=%s reason=%s", bot_id, exc)
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url="/", status_code=303)
-
-    @app.post("/ui/bots/{bot_id}/send-expected-tax-amounts-list")
-    async def queue_send_expected_tax_amounts_list(bot_id: str, request: Request) -> RedirectResponse:
+    async def _queue_tax_doc_id_list_command(
+        *,
+        bot_id: str,
+        request: Request,
+        command: str,
+        log_label: str,
+    ) -> RedirectResponse:
         from urllib.parse import parse_qs
 
         raw_body = (await request.body()).decode("utf-8", errors="ignore")
@@ -418,16 +375,25 @@ def create_app(
         try:
             app.state.service.queue_bot_command(
                 bot_id=bot_id,
-                command="send_rate_based_bookkeeping_expected_tax_amounts",
+                command=command,
                 payload={"tax_doc_ids": tax_doc_ids},
             )
         except KeyError as exc:
-            logger.warning("queue_send_expected_tax_amounts_list_not_found bot_id=%s", bot_id)
+            logger.warning("%s_not_found bot_id=%s", log_label, bot_id)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
-            logger.warning("queue_send_expected_tax_amounts_list_rejected bot_id=%s reason=%s", bot_id, exc)
+            logger.warning("%s_rejected bot_id=%s reason=%s", log_label, bot_id, exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/bots/{bot_id}/rate-based-bookkeeping-send-list")
+    async def queue_rate_based_bookkeeping_send_list(bot_id: str, request: Request) -> RedirectResponse:
+        return await _queue_tax_doc_id_list_command(
+            bot_id=bot_id,
+            request=request,
+            command="send_rate_based_bookkeeping_expected_tax_amounts",
+            log_label="queue_rate_based_bookkeeping_send_list",
+        )
 
     @app.get("/api/agents/{pc_id}/commands/poll")
     def poll_agent_commands(

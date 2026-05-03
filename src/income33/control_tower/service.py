@@ -32,7 +32,7 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
     "login_done": CommandPolicy(dashboard_allowed=True),
     "fill_login": CommandPolicy(dashboard_allowed=True),
     "refresh_page": CommandPolicy(dashboard_allowed=True),
-    "preview_send_targets": CommandPolicy(dashboard_allowed=True),
+    "preview_send_targets": CommandPolicy(),
     "submit_auth_code": CommandPolicy(),
     "send_expected_tax_amounts": CommandPolicy(
         sender_only=True,
@@ -45,12 +45,10 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
     "send_rate_based_bookkeeping_expected_tax_amount": CommandPolicy(sender_only=True),
     "preview_rate_based_bookkeeping_expected_tax_amounts": CommandPolicy(
         sender_only=True,
-        dashboard_allowed=True,
         default_retry={"interval_sec": 60, "max_attempts": 2},
     ),
     "send_rate_based_bookkeeping_expected_tax_amounts": CommandPolicy(
         sender_only=True,
-        dashboard_allowed=True,
         default_retry={"interval_sec": 60, "max_attempts": 2},
     ),
 }
