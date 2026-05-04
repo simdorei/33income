@@ -57,7 +57,13 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         sender_only=True,
         default_retry={"interval_sec": 60, "max_attempts": 2},
     ),
-    "submit_tax_reports": CommandPolicy(reporter_only=True, dashboard_allowed=True),
+    "submit_tax_reports": CommandPolicy(
+        reporter_only=True,
+        dashboard_allowed=True,
+        default_retry={"interval_sec": 300},
+        preserves_repeat_schedule=True,
+        repeat_schedule_enabled=True,
+    ),
 }
 
 if missing_policy_commands := set(COMMAND_TYPES) - set(_COMMAND_POLICIES):

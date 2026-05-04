@@ -105,16 +105,7 @@ def _all_bots_action_form(
 
 
 def _reporter_one_click_custom_type_filter_select() -> str:
-    options_html = "".join(
-        f"<option value='{escape(option, quote=True)}'{' selected' if option == 'ALL' else ''}>{escape(option)}</option>"
-        for option in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS
-    )
-    return (
-        "<label class='inline-select'>자동조회 신고제출 유형 "
-        "<select name='tax_doc_custom_type_filter'>"
-        f"{options_html}"
-        "</select></label>"
-    )
+    return ""
 
 
 def _global_bulk_actions_html() -> str:
@@ -142,7 +133,7 @@ def _global_bulk_actions_html() -> str:
                 action="/ui/commands/reporters/submit-tax-reports-one-click-all",
                 label="전체 자동조회 신고제출 실행",
                 confirm_message="reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉할까요?",
-                hint="SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출",
+                hint="SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출",
                 extra_controls=_reporter_one_click_custom_type_filter_select(),
             ),
         ]
@@ -185,9 +176,9 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
     return (
         f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/유형 ALL/검토 NORMAL 대상을 자동조회하고 20건씩 순차 실행할까요?')\">"
+        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회하고, 없으면 5분 대기 후 반복할까요?')\">"
         "자동조회 신고제출 실행</button>"
-        "<span class='hint'>SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출</span>"
+        "<span class='hint'>SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출</span>"
         "</form>"
         "<details class='advanced-action' style='display:inline'>"
         "<summary>고급: 수동 taxDocId 지정</summary>"

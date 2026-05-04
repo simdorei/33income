@@ -170,17 +170,17 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "수동 신고준비(고급)" in root.text
     assert "수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
     assert "자동조회 신고제출 실행" in root.text
-    assert "입력칸 없이 SUBMIT_READY/유형 ALL/검토 NORMAL 대상을 자동조회" in root.text
-    assert "SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출" in root.text
+    assert "입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회" in root.text
+    assert "SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출" in root.text
     assert "전체 계산발송" in root.text
     assert "전체 단순경비율 목록발송" in root.text
     assert "전체 경비율 장부발송" in root.text
     assert "전체 자동조회 신고제출 실행" in root.text
-    assert "자동조회 신고제출 유형" in root.text
-    assert "name='tax_doc_custom_type_filter'" in root.text
-    assert "value='ALL' selected" in root.text
-    assert "value='NONE'" in root.text
-    assert "value='아'" in root.text
+    assert "자동조회 신고제출 유형" not in root.text
+    assert "name='tax_doc_custom_type_filter'" not in root.text
+    assert "value='ALL' selected" not in root.text
+    assert "value='NONE'" not in root.text
+    assert "value='아'" not in root.text
     assert "/ui/commands/senders/send-expected-tax-amounts-all" in root.text
     assert "/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all" in root.text
     assert "/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all" in root.text
@@ -569,8 +569,12 @@ def test_dashboard_can_queue_reporter_all_one_click_submit(tmp_path):
         payload_json = commands[0]["payload_json"]
         assert '"one_click_submit": true' in payload_json
         assert '"tax_doc_ids": []' in payload_json
-        assert '"tax_doc_custom_type_filter": "ALL"' in payload_json
-        assert '"taxDocCustomTypeFilter": "ALL"' in payload_json
+        assert '"tax_doc_custom_type_filter": "NONE"' in payload_json
+        assert '"taxDocCustomTypeFilter": "NONE"' in payload_json
+        assert '"max_auto_targets": 0' in payload_json
+        assert '"maxAutoTargets": 0' in payload_json
+        assert '"repeat": true' in payload_json
+        assert '"_retry": {"interval_sec": 300' in payload_json
         assert '"workflow_filter_set": "SUBMIT_READY"' in payload_json
         assert '"workflowFilterSet": "SUBMIT_READY"' in payload_json
         assert '"review_type_filter": "NORMAL"' in payload_json
@@ -580,7 +584,7 @@ def test_dashboard_can_queue_reporter_all_one_click_submit(tmp_path):
         assert '"direction": "ASC"' in payload_json
 
 
-def test_dashboard_can_queue_reporter_all_one_click_submit_with_selected_custom_type(tmp_path):
+def test_dashboard_reporter_all_one_click_submit_forces_none_even_with_selected_custom_type(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
@@ -597,8 +601,10 @@ def test_dashboard_can_queue_reporter_all_one_click_submit_with_selected_custom_
         assert len(commands) == 1
         assert commands[0]["command"] == "submit_tax_reports"
         payload_json = commands[0]["payload_json"]
-        assert '"tax_doc_custom_type_filter": "아"' in payload_json
-        assert '"taxDocCustomTypeFilter": "아"' in payload_json
+        assert '"tax_doc_custom_type_filter": "NONE"' in payload_json
+        assert '"taxDocCustomTypeFilter": "NONE"' in payload_json
+        assert '"tax_doc_custom_type_filter": "아"' not in payload_json
+        assert '"taxDocCustomTypeFilter": "아"' not in payload_json
         assert '"workflow_filter_set": "SUBMIT_READY"' in payload_json
         assert '"review_type_filter": "NORMAL"' in payload_json
 
@@ -768,6 +774,12 @@ def test_dashboard_can_queue_report_one_click_submit_without_taxdoc_ids(tmp_path
     assert commands[0]["command"] == "submit_tax_reports"
     assert '"tax_doc_ids": []' in commands[0]["payload_json"]
     assert '"one_click_submit": true' in commands[0]["payload_json"]
+    assert '"tax_doc_custom_type_filter": "NONE"' in commands[0]["payload_json"]
+    assert '"taxDocCustomTypeFilter": "NONE"' in commands[0]["payload_json"]
+    assert '"max_auto_targets": 0' in commands[0]["payload_json"]
+    assert '"maxAutoTargets": 0' in commands[0]["payload_json"]
+    assert '"repeat": true' in commands[0]["payload_json"]
+    assert '"_retry": {"interval_sec": 300' in commands[0]["payload_json"]
 
 
 def test_dashboard_can_queue_report_one_click_status_check_without_taxdoc_ids(tmp_path):

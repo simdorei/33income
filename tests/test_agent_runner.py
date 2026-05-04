@@ -382,6 +382,138 @@ def test_runner_handles_submit_tax_reports_command_on_reporter(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "국세신고 응답수집 완료 성공=1건 실패=1건 로그=tax_report_submit_responses.jsonl"
 
 
+def test_runner_schedules_reporter_one_click_none_submit_repeat_and_requeries_after_five_minutes(monkeypatch):
+    monotonic_points = iter([1000.0, 1299.0, 1299.0, 1300.0, 1300.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_submit_tax_reports(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        if len(calls) == 2:
+            assert client.heartbeats[-1]["current_step"] == "국세신고 반복 중"
+        return {
+            "status": "session_active",
+            "current_step": f"신고제출 대상 없음 #{len(calls)}",
+            "attempted_count": 0,
+            "tax_doc_ids": [],
+        }
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.submit_tax_reports", fake_submit_tax_reports)
+    runner, client = build_runner(
+        [
+            {
+                "id": 310,
+                "command": "submit_tax_reports",
+                "payload_json": json.dumps(
+                    {
+                        "tax_doc_ids": [],
+                        "one_click_submit": True,
+                        "tax_doc_custom_type_filter": "NONE",
+                        "taxDocCustomTypeFilter": "NONE",
+                        "max_auto_targets": 0,
+                        "maxAutoTargets": 0,
+                        "repeat": True,
+                        "_retry": {"interval_sec": 300},
+                    }
+                ),
+            }
+        ],
+        bot_id="reporter-01",
+        bot_type="reporter",
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    assert client.heartbeats[-1]["current_step"] == "신고제출 대상 없음 #1 / 다음신고 300초 후"
+    runner.run_once()
+    assert client.heartbeats[-1]["current_step"] == "신고제출 대상 없음 #1 / 다음신고 1초 후"
+    runner.run_once()
+
+    expected_repeat_payload = {
+        "tax_doc_ids": [],
+        "one_click_submit": True,
+        "oneClickSubmit": True,
+        "tax_doc_custom_type_filter": "NONE",
+        "taxDocCustomTypeFilter": "NONE",
+        "max_auto_targets": 0,
+        "maxAutoTargets": 0,
+        "repeat": True,
+        "_retry": {"interval_sec": 300},
+    }
+    assert calls == [
+        {"bot_id": "reporter-01", "payload": expected_repeat_payload},
+        {"bot_id": "reporter-01", "payload": expected_repeat_payload},
+    ]
+    assert client.completed == [{"command_id": 310, "status": "done", "error_message": None}]
+    assert client.heartbeats[-1]["current_step"] == "신고제출 대상 없음 #2 / 다음신고 300초 후"
+    assert runner._repeat_send_payload is None
+
+
+def test_runner_cancels_reporter_submit_repeat_when_operator_queues_control_command(monkeypatch):
+    monotonic_points = iter([1000.0, 1300.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_submit_tax_reports(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "신고제출 대상 없음", "attempted_count": 0, "tax_doc_ids": []}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.submit_tax_reports", fake_submit_tax_reports)
+    runner, client = build_runner(
+        [
+            {
+                "id": 311,
+                "command": "submit_tax_reports",
+                "payload_json": json.dumps(
+                    {
+                        "tax_doc_ids": [],
+                        "one_click_submit": True,
+                        "tax_doc_custom_type_filter": "NONE",
+                        "max_auto_targets": 0,
+                        "repeat": True,
+                        "_retry": {"interval_sec": 300},
+                    }
+                ),
+            }
+        ],
+        bot_id="reporter-01",
+        bot_type="reporter",
+        monotonic_fn=fake_monotonic,
+    )
+
+    runner.run_once()
+    client.commands = [{"id": 312, "command": "stop", "payload_json": "{}"}]
+    runner.run_once()
+    runner.run_once()
+
+    assert calls == [
+        {
+            "bot_id": "reporter-01",
+            "payload": {
+                "tax_doc_ids": [],
+                "one_click_submit": True,
+                "oneClickSubmit": True,
+                "tax_doc_custom_type_filter": "NONE",
+                "taxDocCustomTypeFilter": "NONE",
+                "max_auto_targets": 0,
+                "maxAutoTargets": 0,
+                "repeat": True,
+                "_retry": {"interval_sec": 300},
+            },
+        }
+    ]
+    assert client.completed == [
+        {"command_id": 311, "status": "done", "error_message": None},
+        {"command_id": 312, "status": "done", "error_message": None},
+    ]
+
+
 def test_runner_rejects_reporter_only_command_on_sender(monkeypatch):
     runner, client = build_runner(
         [{"id": 32, "command": "submit_tax_reports", "payload_json": json.dumps({"tax_doc_ids": [1001]})}],

@@ -20,9 +20,12 @@ DASHBOARD_ALLOWED_COMMANDS = frozenset(dashboard_allowed_commands())
 REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS = frozenset(
     ("ALL", "NONE", "가", "나", "다", "라", "마", "바", "사", "아")
 )
+REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER = "NONE"
+REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS = 300
 
 
-def _reporter_one_click_submit_payload(custom_type_filter: str) -> dict[str, Any]:
+def _reporter_one_click_submit_payload(custom_type_filter: str | None = None) -> dict[str, Any]:
+    custom_type_filter = REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER
     return {
         "tax_doc_ids": [],
         "one_click_submit": True,
@@ -37,6 +40,10 @@ def _reporter_one_click_submit_payload(custom_type_filter: str) -> dict[str, Any
         "sort_field": "SUBMIT_REQUEST_DATE_TIME",
         "sortField": "SUBMIT_REQUEST_DATE_TIME",
         "direction": "ASC",
+        "max_auto_targets": 0,
+        "maxAutoTargets": 0,
+        "repeat": True,
+        "_retry": {"interval_sec": REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS},
     }
 
 
@@ -234,14 +241,26 @@ def register_bot_command_routes(app: FastAPI) -> None:
 
     @app.post("/ui/bots/{bot_id}/tax-report-one-click-submit-list")
     async def queue_tax_report_one_click_submit_list(bot_id: str, request: Request) -> RedirectResponse:
-        return await _queue_tax_doc_id_list_command(
-            bot_id=bot_id,
-            request=request,
-            command="submit_tax_reports",
-            log_label="queue_tax_report_one_click_submit_list",
-            extra_payload={"one_click_submit": True},
-            allow_empty_tax_doc_ids=True,
+        tax_doc_ids = parse_tax_doc_ids(
+            await read_form_value(request, "tax_doc_ids"),
+            allow_empty=True,
         )
+        payload_data = {"tax_doc_ids": tax_doc_ids, "one_click_submit": True}
+        if not tax_doc_ids:
+            payload_data.update(_reporter_one_click_submit_payload())
+        try:
+            app.state.service.queue_bot_command(
+                bot_id=bot_id,
+                command="submit_tax_reports",
+                payload=payload_data,
+            )
+        except KeyError as exc:
+            logger.warning("queue_tax_report_one_click_submit_list_not_found bot_id=%s", bot_id)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            logger.warning("queue_tax_report_one_click_submit_list_rejected bot_id=%s reason=%s", bot_id, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url="/", status_code=303)
 
     @app.post("/ui/bots/{bot_id}/tax-report-one-click-submit-status-check-list")
     async def queue_tax_report_one_click_submit_status_check_list(bot_id: str, request: Request) -> RedirectResponse:

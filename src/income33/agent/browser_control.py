@@ -2098,10 +2098,10 @@ def submit_tax_reports(
         )
         fetch_page_size = max(1, min(100, requested_fetch_page_size))
 
-        raw_max_auto_targets = (
-            payload.get("max_auto_targets")
-            or payload.get("maxAutoTargets")
-            or os.getenv("INCOME33_ONE_CLICK_MAX_AUTO_TARGETS")
+        raw_max_auto_targets = _payload_or_env_value(
+            payload,
+            ("max_auto_targets", "maxAutoTargets"),
+            ("INCOME33_ONE_CLICK_MAX_AUTO_TARGETS",),
         )
         max_auto_targets: int | None
         if raw_max_auto_targets in (None, ""):
@@ -2139,7 +2139,7 @@ def submit_tax_reports(
             year = _resolve_taxdoc_year(payload)
             workflow_filter_set = str(payload.get("workflow_filter_set") or payload.get("workflowFilterSet") or "SUBMIT_READY")
             tax_doc_custom_type_filter = str(
-                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "ALL"
+                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "NONE"
             )
             review_type_filter = str(payload.get("review_type_filter") or payload.get("reviewTypeFilter") or "NORMAL")
             apply_expense_rate_type_filter = str(

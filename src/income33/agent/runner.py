@@ -109,6 +109,9 @@ class AgentRunner:
         self._next_repeated_send_monotonic: float | None = None
         self._repeat_send_attempt_counts: dict[int, int] = {}
         self._repeat_send_failure_count: int = 0
+        self._repeat_tax_report_submit_payload: dict[str, Any] | None = None
+        self._next_repeated_tax_report_submit_monotonic: float | None = None
+        self._repeat_tax_report_submit_failure_count: int = 0
         self._failure_step_messages: dict[str, str] = {
             "send_expected_tax_amounts": "계산발송 실패",
             "send_simple_expense_rate_expected_tax_amounts": "단순경비율 목록발송 실패",
@@ -202,6 +205,8 @@ class AgentRunner:
         step = self._step_override or self._persistent_step
         if self._step_override is None and self._repeat_send_payload is not None:
             step = self._repeat_send_wait_step(step or "계산발송 완료")
+        if self._step_override is None and self._repeat_tax_report_submit_payload is not None:
+            step = self._repeat_tax_report_submit_wait_step(step or "신고제출 대상 없음")
         if step:
             snapshot.current_step = step
             snapshot.status = self.bot.status
@@ -230,6 +235,46 @@ class AgentRunner:
             else:
                 remaining_seconds = max(0, int(self._next_repeated_send_monotonic - self._monotonic()))
         return f"{base_step} / 다음발송 {remaining_seconds}초 후"
+
+    @staticmethod
+    def _strip_repeat_tax_report_submit_wait_suffix(step: str) -> str:
+        return step.split(" / 다음신고 ", 1)[0]
+
+    def _repeat_tax_report_submit_wait_step(self, base_step: str, remaining_seconds: int | None = None) -> str:
+        base_step = self._strip_repeat_tax_report_submit_wait_suffix(base_step)
+        if remaining_seconds is None:
+            if self._next_repeated_tax_report_submit_monotonic is None:
+                remaining_seconds = resolve_retry_interval_seconds("submit_tax_reports", None)
+            else:
+                remaining_seconds = max(0, int(self._next_repeated_tax_report_submit_monotonic - self._monotonic()))
+        return f"{base_step} / 다음신고 {remaining_seconds}초 후"
+
+    @staticmethod
+    def _normalize_tax_report_submit_repeat_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_payload = dict(payload)
+        normalized_payload["tax_doc_ids"] = []
+        normalized_payload.pop("taxDocIds", None)
+        normalized_payload.pop("taxDocIdSet", None)
+        normalized_payload["one_click_submit"] = True
+        normalized_payload["oneClickSubmit"] = True
+        normalized_payload["tax_doc_custom_type_filter"] = "NONE"
+        normalized_payload["taxDocCustomTypeFilter"] = "NONE"
+        normalized_payload["max_auto_targets"] = 0
+        normalized_payload["maxAutoTargets"] = 0
+        normalized_payload["repeat"] = True
+        return normalized_payload
+
+    @classmethod
+    def _should_schedule_repeated_tax_report_submit(cls, payload: dict[str, Any]) -> bool:
+        if payload.get("repeat") is not True:
+            return False
+        if not (payload.get("one_click_submit") is True or payload.get("oneClickSubmit") is True):
+            return False
+        if payload.get("one_click_submit_status_check") or payload.get("oneClickSubmitStatusCheck"):
+            return False
+        if payload.get("prepare_only") or payload.get("prepareOnly"):
+            return False
+        return not payload_has_explicit_tax_doc_ids(payload)
 
     def _build_heartbeat_payload(self, snapshot: Any) -> dict[str, Any]:
         payload = {
@@ -353,6 +398,94 @@ class AgentRunner:
         self._next_repeated_send_monotonic = None
         self._repeat_send_attempt_counts = {}
         self._repeat_send_failure_count = 0
+
+    def _schedule_repeated_tax_report_submit(
+        self,
+        payload: dict[str, Any],
+        retry_policy: dict[str, Any],
+    ) -> None:
+        interval = resolve_retry_interval_seconds("submit_tax_reports", retry_policy)
+        self._repeat_tax_report_submit_payload = self._normalize_tax_report_submit_repeat_payload(payload)
+        self._repeat_tax_report_submit_payload["_repeat_interval_sec"] = interval
+        self._next_repeated_tax_report_submit_monotonic = self._monotonic() + interval
+        self._repeat_tax_report_submit_failure_count = 0
+        self.logger.info(
+            "tax_report_submit_repeat_scheduled bot_id=%s interval=%s custom_type=%s",
+            self.agent.bot_id,
+            interval,
+            self._repeat_tax_report_submit_payload.get("tax_doc_custom_type_filter"),
+        )
+
+    def _cancel_repeated_tax_report_submit(self) -> None:
+        if self._repeat_tax_report_submit_payload is None:
+            return
+        self.logger.info("tax_report_submit_repeat_cancelled bot_id=%s", self.agent.bot_id)
+        self._repeat_tax_report_submit_payload = None
+        self._next_repeated_tax_report_submit_monotonic = None
+        self._repeat_tax_report_submit_failure_count = 0
+
+    def _run_repeated_tax_report_submit_if_due(self) -> None:
+        if self._repeat_tax_report_submit_payload is None or self._next_repeated_tax_report_submit_monotonic is None:
+            return
+        if self.bot.status not in _REPEAT_SEND_CONTINUABLE_STATUSES:
+            self._cancel_repeated_tax_report_submit()
+            return
+        now = self._monotonic()
+        if now < self._next_repeated_tax_report_submit_monotonic:
+            return
+
+        payload = dict(self._repeat_tax_report_submit_payload)
+        interval = resolve_retry_interval_seconds(
+            "submit_tax_reports",
+            {"interval_sec": payload.get("_repeat_interval_sec")},
+        )
+        submit_payload = {k: v for k, v in payload.items() if not str(k).startswith("_repeat_")}
+        submit_payload = self._normalize_tax_report_submit_repeat_payload(submit_payload)
+        try:
+            self._set_bot_state("session_active", "국세신고 반복 중")
+            self._send_current_state_heartbeat()
+            result = submit_tax_reports(
+                bot_id=self.agent.bot_id,
+                payload=submit_payload,
+                logger=logging.getLogger("income33.agent.browser_control"),
+            )
+        except Exception as exc:
+            self._repeat_tax_report_submit_failure_count += 1
+            status_code = self._extract_status_code(str(exc))
+            self._next_repeated_tax_report_submit_monotonic = now + interval
+            self._set_bot_state(
+                "session_active",
+                self._repeat_tax_report_submit_wait_step(
+                    f"국세신고 실패({self._repeat_tax_report_submit_failure_count}회): {exc}",
+                    remaining_seconds=interval,
+                ),
+            )
+            self._send_current_state_heartbeat()
+            self.logger.exception(
+                "tax_report_submit_repeat_failed bot_id=%s next_interval=%s failure_count=%s status=%s",
+                self.agent.bot_id,
+                interval,
+                self._repeat_tax_report_submit_failure_count,
+                status_code,
+            )
+            return
+
+        self._next_repeated_tax_report_submit_monotonic = now + interval
+        self._repeat_tax_report_submit_failure_count = 0
+        result_step = str(result.get("current_step") or "신고제출 대상 없음")
+        self._set_bot_state(
+            str(result.get("status") or "session_active"),
+            self._repeat_tax_report_submit_wait_step(result_step, remaining_seconds=interval),
+        )
+        self._send_current_state_heartbeat()
+        self.logger.info(
+            "tax_report_submit_repeat_done bot_id=%s next_interval=%s attempted_count=%s success_count=%s tax_doc_ids=%s",
+            self.agent.bot_id,
+            interval,
+            result.get("attempted_count"),
+            result.get("success_count"),
+            list(result.get("tax_doc_ids") or []),
+        )
 
     @classmethod
     def _track_repeat_send_attempts(
@@ -663,18 +796,31 @@ class AgentRunner:
         )
 
     def _handle_submit_tax_reports(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_tax_report_submit()
+        normalized_payload = self._normalize_send_tax_doc_payload(payload)
+        should_repeat = self._should_schedule_repeated_tax_report_submit(normalized_payload)
+        if should_repeat:
+            normalized_payload = self._normalize_tax_report_submit_repeat_payload(normalized_payload)
         self._set_bot_state("session_active", "국세신고 응답수집 중")
         self._send_current_state_heartbeat()
-        normalized_payload = self._normalize_send_tax_doc_payload(payload)
         result = submit_tax_reports(
             bot_id=self.agent.bot_id,
             payload=normalized_payload,
             logger=logging.getLogger("income33.agent.browser_control"),
         )
-        self._set_bot_state(
-            str(result.get("status") or "session_active"),
-            str(result.get("current_step") or "국세신고 응답수집 완료"),
-        )
+        result_status = str(result.get("status") or "session_active")
+        result_step = str(result.get("current_step") or "국세신고 응답수집 완료")
+        if should_repeat:
+            self._schedule_repeated_tax_report_submit(normalized_payload, retry_policy)
+            repeat_interval = resolve_retry_interval_seconds(
+                "submit_tax_reports",
+                {"interval_sec": self._repeat_tax_report_submit_payload.get("_repeat_interval_sec")},
+            )
+            result_step = self._repeat_tax_report_submit_wait_step(
+                result_step,
+                remaining_seconds=repeat_interval,
+            )
+        self._set_bot_state(result_status, result_step)
 
     def _handle_login_done(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
         self._set_bot_state("idle", "idle")
@@ -728,6 +874,7 @@ class AgentRunner:
         )
         if should_cancel_repeated_send_before_command(command_name):
             self._cancel_repeated_send()
+            self._cancel_repeated_tax_report_submit()
 
         try:
             parsed_payload = self._command_payload_json(command)
@@ -774,6 +921,7 @@ class AgentRunner:
 
         if not commands:
             self._run_repeated_send_if_due()
+            self._run_repeated_tax_report_submit_if_due()
 
     def run_forever(self) -> None:
         interval = max(1, int(self.agent.heartbeat_interval_seconds))
