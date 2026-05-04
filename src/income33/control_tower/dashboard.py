@@ -94,10 +94,24 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
         f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-list' "
         "class='inline-form' style='display:inline'>"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='신고제출 taxDocId 목록(비우면 SUBMIT_READY/NONE/NORMAL 자동조회 20건)'></textarea>"
+        "placeholder='신고제출 taxDocId 목록(비우면 SUBMIT_READY/NONE/NORMAL 전체 자동조회 후 20건씩 실행)'></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. taxDocId 목록이 비어있으면 SUBMIT_READY/NONE/NORMAL 20건 자동조회 후 NewTA 원클릭 신고제출을 시작할까요?')\">"
+        "onclick=\"return confirm('실제 최종 신고제출입니다. taxDocId 목록이 비어있으면 SUBMIT_READY/NONE/NORMAL 전체를 자동조회하고 20건씩 순차 실행할까요?')\">"
         "원클릭 신고제출</button>"
+        "</form>"
+    )
+
+
+def _taxdoc_id_list_tax_report_one_click_status_check_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-status-check-list' "
+        "class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='상태재확인 taxDocId 목록(비우면 진행중 로그에서 자동조회)'></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('진행중 건 상태만 재확인합니다. 신고제출 PUT 없이 status 조회만 실행할까요?')\">"
+        "원클릭 상태재확인</button>"
         "</form>"
     )
 
@@ -134,6 +148,7 @@ def _bot_actions_html(bot_id: str) -> str:
     if bot_id.startswith("reporter-"):
         buttons.append(_taxdoc_id_list_tax_report_submit_form(bot_id))
         buttons.append(_taxdoc_id_list_tax_report_one_click_submit_form(bot_id))
+        buttons.append(_taxdoc_id_list_tax_report_one_click_status_check_form(bot_id))
     buttons.extend(
         [
             _command_button(bot_id, "login_done", "로그인 완료", "login-done"),
