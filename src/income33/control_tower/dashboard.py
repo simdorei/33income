@@ -3,6 +3,12 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
+from income33.control_tower.rate_based_bookkeeping_config import (
+    rate_based_bookkeeping_auto_action_label,
+    rate_based_bookkeeping_auto_confirm_message,
+    rate_based_bookkeeping_auto_hint,
+)
+
 
 BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
     ("발송 봇 01-09", "sender", 1, 9, 0),
@@ -62,13 +68,16 @@ def _submit_auth_code_form(bot_id: str) -> str:
 
 def _taxdoc_id_list_rate_based_bookkeeping_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
+    safe_confirm = escape(rate_based_bookkeeping_auto_confirm_message(), quote=True)
+    safe_label = escape(rate_based_bookkeeping_auto_action_label())
+    safe_hint = escape(rate_based_bookkeeping_auto_hint())
     return (
         f"<form method='post' action='/ui/bots/{safe_bot_id}/rate-based-bookkeeping-send-list' "
         "class='inline-form' style='display:inline'>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('REVIEW_WAITING + 유형 가 + 검토 NORMAL 대상을 자동조회해서 경비율 장부발송을 순차 실행할까요?')\">"
-        "경비율 장부발송(NORMAL·가)</button>"
-        "<span class='hint'>REVIEW_WAITING · 유형 가 · 검토 NORMAL 자동조회</span>"
+        f"onclick=\"return confirm('{safe_confirm}')\">"
+        f"{safe_label}</button>"
+        f"<span class='hint'>{safe_hint}</span>"
         "</form>"
     )
 

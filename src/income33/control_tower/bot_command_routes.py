@@ -6,19 +6,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+from income33.control_tower.rate_based_bookkeeping_config import (
+    rate_based_bookkeeping_auto_filter_payload,
+)
 from income33.control_tower.request_parsing import parse_tax_doc_ids, read_form_value
 from income33.control_tower.service import dashboard_allowed_commands
 from income33.models import CommandRequest
-
-RATE_BASED_BOOKKEEPING_AUTO_FILTER_PAYLOAD: dict[str, Any] = {
-    "workflow_filter_set": "REVIEW_WAITING",
-    "tax_doc_custom_type_filter": "가",
-    "review_type_filter": "NORMAL",
-    "apply_expense_rate_type_filter": "ALL",
-    "sort": "REVIEW_REQUEST_DATE_TIME",
-    "direction": "ASC",
-    "scan_order": "forward",
-}
 
 logger = logging.getLogger("income33.control_tower.app")
 
@@ -110,7 +103,7 @@ def register_bot_command_routes(app: FastAPI) -> None:
             request=request,
             command="send_rate_based_bookkeeping_expected_tax_amounts",
             log_label="queue_rate_based_bookkeeping_send_list",
-            extra_payload=RATE_BASED_BOOKKEEPING_AUTO_FILTER_PAYLOAD,
+            extra_payload=rate_based_bookkeeping_auto_filter_payload(),
             allow_empty_tax_doc_ids=True,
         )
 

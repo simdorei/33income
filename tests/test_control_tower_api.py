@@ -719,6 +719,41 @@ def test_dashboard_can_queue_rate_based_bookkeeping_send_list_without_taxdoc_ids
     assert '"scan_order": "forward"' in commands[0]["payload_json"]
 
 
+def test_rate_based_bookkeeping_auto_filters_are_control_tower_env_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_WORKFLOW_FILTER_SET", "SUBMIT_READY")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_TAX_DOC_CUSTOM_TYPE_FILTER", "나")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_REVIEW_TYPE_FILTER", "CUSTOM")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_APPLY_EXPENSE_RATE_TYPE_FILTER", "SIMPLIFIED_EXPENSE_RATE")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_SORT", "TAXDOC_ID")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_DIRECTION", "DESC")
+    monkeypatch.setenv("INCOME33_RATE_BOOKKEEPING_SCAN_ORDER", "reverse")
+    client = build_client(tmp_path)
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "경비율 장부발송(CUSTOM·나)" in root.text
+    assert "SUBMIT_READY · 유형 나 · 검토 CUSTOM 자동조회" in root.text
+
+    response = client.post(
+        "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
+        data={},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    payload_json = polled.json()["commands"][0]["payload_json"]
+    assert '"tax_doc_ids": []' in payload_json
+    assert '"workflow_filter_set": "SUBMIT_READY"' in payload_json
+    assert '"tax_doc_custom_type_filter": "나"' in payload_json
+    assert '"review_type_filter": "CUSTOM"' in payload_json
+    assert '"apply_expense_rate_type_filter": "SIMPLIFIED_EXPENSE_RATE"' in payload_json
+    assert '"sort": "TAXDOC_ID"' in payload_json
+    assert '"direction": "DESC"' in payload_json
+    assert '"scan_order": "reverse"' in payload_json
+
+
 def test_dashboard_can_queue_auth_code_command(tmp_path):
     client = build_client(tmp_path)
 
