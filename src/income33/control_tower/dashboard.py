@@ -65,11 +65,10 @@ def _taxdoc_id_list_rate_based_bookkeeping_form(bot_id: str) -> str:
     return (
         f"<form method='post' action='/ui/bots/{safe_bot_id}/rate-based-bookkeeping-send-list' "
         "class='inline-form' style='display:inline'>"
-        "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 ID목록 경비율 장부발송(개별 순차)을 진행할까요?')\">"
-        "ID목록 경비율 장부발송</button>"
+        "onclick=\"return confirm('REVIEW_WAITING + 유형 가 + 검토 NORMAL 대상을 자동조회해서 경비율 장부발송을 순차 실행할까요?')\">"
+        "경비율 장부발송(NORMAL·가)</button>"
+        "<span class='hint'>REVIEW_WAITING · 유형 가 · 검토 NORMAL 자동조회</span>"
         "</form>"
     )
 

@@ -146,7 +146,10 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "계산발송</button>" in root.text
     assert "목록조회된 대상에 실제 계산발송을 요청하고 5분 후 자동 반복합니다. 진행할까요?" in root.text
     assert "단순경비율 목록발송" in root.text
-    assert "ID목록 경비율 장부발송" in root.text
+    assert "경비율 장부발송(NORMAL·가)" in root.text
+    assert "REVIEW_WAITING · 유형 가 · 검토 NORMAL 자동조회" in root.text
+    assert "ID목록 경비율 장부발송" not in root.text
+    assert "붙여넣은 taxDocId 목록으로 ID목록 경비율" not in root.text
     assert "일괄세션 확인" not in root.text
     assert "일괄 계산발송 시작" not in root.text
     assert "content='5'" in root.text
@@ -158,7 +161,7 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/send-expected-tax-amounts-list" not in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send-list" in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send'" not in root.text
-    assert root.text.count("name='tax_doc_ids'") == 36
+    assert root.text.count("name='tax_doc_ids'") == 27
     assert "name='tax_doc_id'" not in root.text
     assert "<textarea" in root.text
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
@@ -698,7 +701,7 @@ def test_dashboard_can_queue_rate_based_bookkeeping_send_list_without_taxdoc_ids
 
     response = client.post(
         "/ui/bots/sender-01/rate-based-bookkeeping-send-list",
-        data={"tax_doc_ids": "   "},
+        data={},
         follow_redirects=False,
     )
 
@@ -709,6 +712,11 @@ def test_dashboard_can_queue_rate_based_bookkeeping_send_list_without_taxdoc_ids
     assert len(commands) == 1
     assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
     assert '"tax_doc_ids": []' in commands[0]["payload_json"]
+    assert '"workflow_filter_set": "REVIEW_WAITING"' in commands[0]["payload_json"]
+    assert '"tax_doc_custom_type_filter": "가"' in commands[0]["payload_json"]
+    assert '"review_type_filter": "NORMAL"' in commands[0]["payload_json"]
+    assert '"direction": "ASC"' in commands[0]["payload_json"]
+    assert '"scan_order": "forward"' in commands[0]["payload_json"]
 
 
 def test_dashboard_can_queue_auth_code_command(tmp_path):
