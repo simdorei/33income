@@ -172,6 +172,52 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
 
 
+def test_heartbeat_persists_agent_repo_version_fields_and_dashboard_shows_status(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "BOT-PC-01",
+            "ip_address": "192.168.0.101",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "session_active",
+            "current_step": "계산발송 대기",
+            "success_count": 3,
+            "failure_count": 1,
+            "agent_version": "0.1.0",
+            "repo_path": "C:\\33income",
+            "repo_is_git": True,
+            "git_head": "abcdef1234567890",
+            "git_head_short": "abcdef1",
+            "git_branch": "main",
+            "git_origin_main": "1111111222222222",
+            "git_up_to_date": False,
+            "git_dirty": False,
+            "version_status": "outdated",
+        },
+    )
+
+    assert response.status_code == 200
+    agent = client.get("/api/agents").json()["agents"][0]
+    assert agent["agent_version"] == "0.1.0"
+    assert agent["repo_path"] == "C:\\33income"
+    assert agent["repo_is_git"] == 1
+    assert agent["git_head_short"] == "abcdef1"
+    assert agent["git_branch"] == "main"
+    assert agent["git_up_to_date"] == 0
+    assert agent["version_status"] == "outdated"
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "version_status" in root.text
+    assert "outdated" in root.text
+    assert "abcdef1" in root.text
+    assert "C:\\33income" in root.text
+
+
 def test_api_rejects_expected_tax_amount_commands_for_reporter_bot(tmp_path):
     client = build_client(tmp_path)
 

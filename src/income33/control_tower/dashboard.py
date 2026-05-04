@@ -175,6 +175,13 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
         "hostname",
         "ip_address",
         "status",
+        "agent_version",
+        "version_status",
+        "git_head_short",
+        "git_branch",
+        "git_up_to_date",
+        "git_dirty",
+        "repo_path",
         "assigned_bot_ids",
         "last_heartbeat_at",
     ]

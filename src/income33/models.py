@@ -67,3 +67,13 @@ class HeartbeatRequest(BaseModel):
     current_step: Optional[str] = None
     success_count: int = 0
     failure_count: int = 0
+    agent_version: Optional[str] = None
+    repo_path: Optional[str] = None
+    repo_is_git: Optional[bool] = None
+    git_head: Optional[str] = None
+    git_head_short: Optional[str] = None
+    git_branch: Optional[str] = None
+    git_origin_main: Optional[str] = None
+    git_up_to_date: Optional[bool] = None
+    git_dirty: Optional[bool] = None
+    version_status: Optional[str] = None

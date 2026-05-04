@@ -57,6 +57,35 @@ def stub_repeat_force_refresh(monkeypatch):
     return calls
 
 
+def test_runner_heartbeat_includes_repo_version_info(monkeypatch):
+    monkeypatch.setattr(
+        "income33.agent.runner.collect_repo_version_info",
+        lambda: {
+            "repo_path": "C:\\33income",
+            "repo_is_git": True,
+            "git_head": "abcdef1234567890",
+            "git_head_short": "abcdef1",
+            "git_branch": "main",
+            "git_origin_main": "abcdef1234567890",
+            "git_up_to_date": True,
+            "git_dirty": False,
+            "version_status": "ok",
+        },
+    )
+    runner, client = build_runner()
+
+    runner.run_once()
+
+    heartbeat = client.heartbeats[-1]
+    assert heartbeat["agent_version"] == "0.1.0"
+    assert heartbeat["repo_path"] == "C:\\33income"
+    assert heartbeat["repo_is_git"] is True
+    assert heartbeat["git_head_short"] == "abcdef1"
+    assert heartbeat["git_up_to_date"] is True
+    assert heartbeat["git_dirty"] is False
+    assert heartbeat["version_status"] == "ok"
+
+
 def test_runner_handles_open_login_command(monkeypatch, tmp_path):
     calls = []
 

@@ -41,6 +41,7 @@ from income33.control_tower.service import (
     should_schedule_repeated_send,
 )
 from income33.logging_utils import setup_component_logger
+from income33.version_info import DEFAULT_AGENT_VERSION, collect_repo_version_info
 
 
 _KEEPALIVE_BLOCKING_STATUSES = {
@@ -218,17 +219,20 @@ class AgentRunner:
         return f"{base_step} / 다음발송 {remaining_seconds}초 후"
 
     def _build_heartbeat_payload(self, snapshot: Any) -> dict[str, Any]:
-        return {
+        payload = {
             "pc_id": self.agent.pc_id,
             "hostname": self.agent.hostname,
             "ip_address": self.agent.ip_address,
             "agent_status": "online",
+            "agent_version": DEFAULT_AGENT_VERSION,
             "bot_id": snapshot.bot_id,
             "bot_status": snapshot.status,
             "current_step": snapshot.current_step,
             "success_count": snapshot.success_count,
             "failure_count": snapshot.failure_count,
         }
+        payload.update(collect_repo_version_info())
+        return payload
 
     def _send_snapshot_heartbeat(self, snapshot: Any) -> None:
         heartbeat_payload = self._build_heartbeat_payload(snapshot)

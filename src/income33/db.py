@@ -23,6 +23,25 @@ class Database:
             return None
         return {k: row[k] for k in row.keys()}
 
+    @staticmethod
+    def _ensure_columns(
+        conn: sqlite3.Connection,
+        table: str,
+        columns: dict[str, str],
+    ) -> None:
+        existing_columns = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column_name, column_definition in columns.items():
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_definition}")
+
+    @staticmethod
+    def _optional_bool_to_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        return 1 if bool(value) else 0
+
     def init_db(self) -> None:
         db_path = Path(self.path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +55,15 @@ class Database:
                     ip_address TEXT NOT NULL,
                     status TEXT NOT NULL,
                     agent_version TEXT,
+                    repo_path TEXT,
+                    repo_is_git INTEGER,
+                    git_head TEXT,
+                    git_head_short TEXT,
+                    git_branch TEXT,
+                    git_origin_main TEXT,
+                    git_up_to_date INTEGER,
+                    git_dirty INTEGER,
+                    version_status TEXT,
                     assigned_bot_ids TEXT,
                     last_heartbeat_at TEXT,
                     error_code TEXT,
@@ -98,6 +126,21 @@ class Database:
                     error_message TEXT
                 );
                 """
+            )
+            self._ensure_columns(
+                conn,
+                "agents",
+                {
+                    "repo_path": "TEXT",
+                    "repo_is_git": "INTEGER",
+                    "git_head": "TEXT",
+                    "git_head_short": "TEXT",
+                    "git_branch": "TEXT",
+                    "git_origin_main": "TEXT",
+                    "git_up_to_date": "INTEGER",
+                    "git_dirty": "INTEGER",
+                    "version_status": "TEXT",
+                },
             )
 
     @staticmethod
@@ -436,18 +479,41 @@ class Database:
         agent_status = payload.get("agent_status", "online")
         hostname = payload.get("hostname", "UNKNOWN")
         ip_address = payload.get("ip_address", "0.0.0.0")
+        agent_version = payload.get("agent_version") or "0.1.0"
+        repo_path = payload.get("repo_path")
+        repo_is_git = self._optional_bool_to_int(payload.get("repo_is_git"))
+        git_head = payload.get("git_head")
+        git_head_short = payload.get("git_head_short")
+        git_branch = payload.get("git_branch")
+        git_origin_main = payload.get("git_origin_main")
+        git_up_to_date = self._optional_bool_to_int(payload.get("git_up_to_date"))
+        git_dirty = self._optional_bool_to_int(payload.get("git_dirty"))
+        version_status = payload.get("version_status")
 
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO agents (
                     pc_id, hostname, ip_address, status,
-                    agent_version, assigned_bot_ids, last_heartbeat_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_version, repo_path, repo_is_git, git_head,
+                    git_head_short, git_branch, git_origin_main,
+                    git_up_to_date, git_dirty, version_status,
+                    assigned_bot_ids, last_heartbeat_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pc_id) DO UPDATE SET
                     hostname = excluded.hostname,
                     ip_address = excluded.ip_address,
                     status = excluded.status,
+                    agent_version = excluded.agent_version,
+                    repo_path = excluded.repo_path,
+                    repo_is_git = excluded.repo_is_git,
+                    git_head = excluded.git_head,
+                    git_head_short = excluded.git_head_short,
+                    git_branch = excluded.git_branch,
+                    git_origin_main = excluded.git_origin_main,
+                    git_up_to_date = excluded.git_up_to_date,
+                    git_dirty = excluded.git_dirty,
+                    version_status = excluded.version_status,
                     assigned_bot_ids = excluded.assigned_bot_ids,
                     last_heartbeat_at = excluded.last_heartbeat_at,
                     updated_at = excluded.updated_at
@@ -457,7 +523,16 @@ class Database:
                     hostname,
                     ip_address,
                     agent_status,
-                    "0.1.0",
+                    agent_version,
+                    repo_path,
+                    repo_is_git,
+                    git_head,
+                    git_head_short,
+                    git_branch,
+                    git_origin_main,
+                    git_up_to_date,
+                    git_dirty,
+                    version_status,
                     bot_id,
                     now,
                     now,

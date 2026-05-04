@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from income33.db import Database
 from income33.models import COMMAND_TYPES
+from income33.status_mirror import StatusMirror
 
 logger = logging.getLogger("income33.control_tower.service")
 
@@ -197,9 +198,11 @@ class ControlTowerService:
         self,
         db: Database,
         bootstrap_agent_count: int = 18,
+        status_mirror: StatusMirror | None = None,
     ) -> None:
         self.db = db
         self.bootstrap_agent_count = bootstrap_agent_count
+        self.status_mirror = status_mirror or StatusMirror()
 
     def bootstrap(self) -> None:
         self.db.init_db()
@@ -317,7 +320,14 @@ class ControlTowerService:
         return _sanitize_command_for_response(done)
 
     def receive_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        previous_agent = self.db.get_agent(str(payload.get("pc_id"))) if payload.get("pc_id") else None
+        previous_bot = self.db.get_bot(str(payload.get("bot_id"))) if payload.get("bot_id") else None
         record = self.db.upsert_heartbeat(payload)
+        self.status_mirror.notify_heartbeat(
+            payload,
+            previous_agent=previous_agent,
+            previous_bot=previous_bot,
+        )
         logger.info(
             "AGENT CONNECTED heartbeat_received pc_id=%s bot_id=%s bot_status=%s step=%s",
             payload.get("pc_id"),
