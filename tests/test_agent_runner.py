@@ -1,6 +1,7 @@
 import json
+import logging
 
-from income33.agent.runner import AgentRunner
+from income33.agent.runner import AgentRunner, _check_initial_control_tower_connection
 from income33.config import AgentConfig
 from income33.control_tower.service import (
     reporter_only_commands,
@@ -14,6 +15,9 @@ class FakeClient:
         self.commands = commands or []
         self.heartbeats = []
         self.completed = []
+
+    def health_check(self):
+        return {"status": "ok"}
 
     def send_heartbeat(self, payload):
         self.heartbeats.append(payload)
@@ -44,6 +48,22 @@ def build_runner(commands=None, monotonic_fn=None, bot_id="sender-01", bot_type=
     )
     client = FakeClient(commands=commands)
     return AgentRunner(agent=agent, client=client, monotonic_fn=monotonic_fn), client
+
+
+def test_initial_control_tower_health_failure_does_not_abort_agent_startup(caplog):
+    class FailingHealthClient:
+        def health_check(self):
+            raise RuntimeError("tower unavailable")
+
+    ok = _check_initial_control_tower_connection(
+        client=FailingHealthClient(),
+        logger=logging.getLogger("test.agent.startup"),
+        tower_url="http://127.0.0.1:8330",
+    )
+
+    assert ok is False
+    assert "AGENT INITIAL CONNECT FAILED" in caplog.text
+    assert "agent will keep retrying" in caplog.text
 
 
 def stub_repeat_force_refresh(monkeypatch):

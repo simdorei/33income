@@ -76,6 +76,19 @@ def _build_bot_runner(agent: AgentConfig):
     return SenderBotRunner(bot_id=agent.bot_id)
 
 
+def _check_initial_control_tower_connection(*, client: Any, logger: logging.Logger, tower_url: str) -> bool:
+    try:
+        client.health_check()
+    except Exception:
+        logger.warning(
+            "AGENT INITIAL CONNECT FAILED tower=%s - agent will keep retrying; check control tower host, port, firewall, and agent .env URL",
+            tower_url,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -799,14 +812,11 @@ def main() -> None:
         config.agent.bot_id,
         config.agent.control_tower_url,
     )
-    try:
-        client.health_check()
-    except Exception:
-        logger.error(
-            "AGENT CANNOT CONNECT tower=%s - check control tower host, port, firewall, and agent .env URL",
-            config.agent.control_tower_url,
-        )
-        raise
+    _check_initial_control_tower_connection(
+        client=client,
+        logger=logger,
+        tower_url=config.agent.control_tower_url,
+    )
 
     runner = AgentRunner(agent=config.agent, client=client, logger=logger)
 
