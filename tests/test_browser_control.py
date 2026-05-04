@@ -1182,7 +1182,7 @@ def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_
     assert preview_call[2]["force_refresh"] is True
     assert preview_call[2]["workflow_filter_set"] == "REVIEW_WAITING"
     assert preview_call[2]["tax_doc_custom_type_filter"] == "가"
-    assert preview_call[2]["review_type_filter"] == "ALL"
+    assert preview_call[2]["review_type_filter"] == "NORMAL"
     assert preview_call[2]["apply_expense_rate_type_filter"] == "ALL"
     assert preview_call[2]["sort"] == "REVIEW_REQUEST_DATE_TIME"
     assert preview_call[2]["direction"] == "ASC"
@@ -1249,7 +1249,7 @@ def test_preview_rate_based_bookkeeping_expected_tax_amounts_uses_review_waiting
     assert fetched_query["officeId"] == ["329"]
     assert fetched_query["workflowFilterSet"] == ["REVIEW_WAITING"]
     assert fetched_query["taxDocCustomTypeFilter"] == ["가"]
-    assert fetched_query["reviewTypeFilter"] == ["ALL"]
+    assert fetched_query["reviewTypeFilter"] == ["NORMAL"]
     assert fetched_query["applyExpenseRateTypeFilter"] == ["ALL"]
     assert fetched_query["taxDocServiceCodeTypeFilter"] == ["C0"]
     assert fetched_query["year"] == ["2025"]

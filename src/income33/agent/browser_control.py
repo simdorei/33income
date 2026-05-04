@@ -4341,7 +4341,7 @@ def preview_rate_based_bookkeeping_expected_tax_amounts(
 
     _set_default_pair("workflow_filter_set", "workflowFilterSet", "REVIEW_WAITING")
     _set_default_pair("tax_doc_custom_type_filter", "taxDocCustomTypeFilter", "가")
-    _set_default_pair("review_type_filter", "reviewTypeFilter", "ALL")
+    _set_default_pair("review_type_filter", "reviewTypeFilter", "NORMAL")
     _set_default_pair("apply_expense_rate_type_filter", "applyExpenseRateTypeFilter", "ALL")
     _set_default_pair("sort", "sortField", "REVIEW_REQUEST_DATE_TIME")
     if "direction" not in preview_payload:
