@@ -2615,17 +2615,7 @@ def submit_tax_reports(
             item_failed = False
             calculation_type = _calculation_type_from_value(business_data)
             if calculation_type == "ESTIMATE":
-                if blocked_industry_codes:
-                    _mark_blocked_industry_skip(
-                        normalized_tax_doc_id=normalized_tax_doc_id,
-                        business_numbers=business_numbers,
-                        blocked_industry_codes=blocked_industry_codes,
-                        calculation_type=calculation_type,
-                        correction_count=0,
-                        correction_skipped_reason="calculation_type_estimate",
-                    )
-                else:
-                    eligible_tax_doc_ids.append(normalized_tax_doc_id)
+                eligible_tax_doc_ids.append(normalized_tax_doc_id)
                 continue
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
