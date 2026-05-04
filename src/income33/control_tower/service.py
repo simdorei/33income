@@ -1,15 +1,53 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from income33.db import Database
 from income33.models import COMMAND_TYPES
 from income33.status_mirror import StatusMirror
+from income33.utils.time import to_utc_iso, utc_now
 
 logger = logging.getLogger("income33.control_tower.service")
+
+REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER = "NONE"
+REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS = 300
+REPORTER_ONE_CLICK_COMMAND = "submit_tax_reports"
+
+
+def reporter_one_click_submit_payload() -> dict[str, Any]:
+    custom_type_filter = REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER
+    return {
+        "tax_doc_ids": [],
+        "one_click_submit": True,
+        "oneClickSubmit": True,
+        "tax_doc_custom_type_filter": custom_type_filter,
+        "taxDocCustomTypeFilter": custom_type_filter,
+        "workflow_filter_set": "SUBMIT_READY",
+        "workflowFilterSet": "SUBMIT_READY",
+        "review_type_filter": "NORMAL",
+        "reviewTypeFilter": "NORMAL",
+        "sort": "SUBMIT_REQUEST_DATE_TIME",
+        "sort_field": "SUBMIT_REQUEST_DATE_TIME",
+        "sortField": "SUBMIT_REQUEST_DATE_TIME",
+        "direction": "ASC",
+        "max_auto_targets": 0,
+        "maxAutoTargets": 0,
+        "repeat": True,
+        "_retry": {"interval_sec": REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS},
+    }
+
+
+def _coerce_utc_datetime(value: datetime | None) -> datetime:
+    if value is None:
+        return utc_now()
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -62,7 +100,6 @@ _COMMAND_POLICIES: dict[str, CommandPolicy] = {
         dashboard_allowed=True,
         default_retry={"interval_sec": 300},
         preserves_repeat_schedule=True,
-        repeat_schedule_enabled=True,
     ),
 }
 
@@ -230,6 +267,133 @@ class ControlTowerService:
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.db.list_recent_commands(limit=limit)
 
+    def list_repeat_schedules(self) -> list[dict[str, Any]]:
+        return self.db.list_repeat_schedules()
+
+    def _decode_schedule_payload(self, schedule: dict[str, Any]) -> dict[str, Any]:
+        try:
+            payload = json.loads(str(schedule.get("payload_json") or "{}"))
+        except json.JSONDecodeError as exc:
+            self.db.mark_repeat_schedule_error(
+                schedule_id=int(schedule["id"]),
+                message="payload_json must be valid JSON",
+            )
+            raise ValueError("repeat schedule payload_json must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("repeat schedule payload_json must be an object")
+        return payload
+
+    def start_reporter_one_click_submit_repeat(
+        self,
+        bot_id: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        now_dt = _coerce_utc_datetime(now)
+        interval_sec = REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS
+        next_run_at = to_utc_iso(now_dt + timedelta(seconds=interval_sec))
+        if bot_id is not None:
+            bot = self.db.get_bot(bot_id)
+            if bot is None:
+                raise KeyError(f"bot not found: {bot_id}")
+            if bot.get("bot_type") != "reporter":
+                raise ValueError("tax report submit commands are only allowed for reporter bots")
+            bots = [bot]
+        else:
+            bots = sorted(
+                self.list_bots(bot_type="reporter"),
+                key=lambda row: str(row.get("bot_id") or ""),
+            )
+
+        results: list[dict[str, Any]] = []
+        for bot in bots:
+            target_bot_id = str(bot["bot_id"])
+            payload = reporter_one_click_submit_payload()
+            schedule = self.db.upsert_repeat_schedule(
+                bot_id=target_bot_id,
+                pc_id=str(bot["pc_id"]),
+                command=REPORTER_ONE_CLICK_COMMAND,
+                payload=payload,
+                interval_sec=interval_sec,
+                next_run_at=next_run_at,
+            )
+            queued: dict[str, Any] | None = None
+            if self.db.has_active_command(bot_id=target_bot_id, command=REPORTER_ONE_CLICK_COMMAND):
+                self.db.mark_repeat_schedule_error(
+                    schedule_id=int(schedule["id"]),
+                    message="pending/running command exists",
+                )
+                logger.info(
+                    "repeat_schedule_armed_without_initial_queue bot_id=%s command=%s reason=active_command_exists",
+                    target_bot_id,
+                    REPORTER_ONE_CLICK_COMMAND,
+                )
+            else:
+                queued = self.queue_bot_command(
+                    bot_id=target_bot_id,
+                    command=REPORTER_ONE_CLICK_COMMAND,
+                    payload=payload,
+                )
+                schedule = self.db.mark_repeat_schedule_queued(
+                    schedule_id=int(schedule["id"]),
+                    command_id=int(queued["id"]),
+                    next_run_at=next_run_at,
+                )
+            results.append({"schedule": schedule, "command": queued})
+        return results
+
+    def enqueue_due_repeat_commands(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        now_dt = _coerce_utc_datetime(now)
+        now_iso = to_utc_iso(now_dt)
+        queued_results: list[dict[str, Any]] = []
+        for schedule in self.db.list_due_repeat_schedules(now_iso):
+            bot_id = str(schedule["bot_id"])
+            command = str(schedule["command"])
+            schedule_id = int(schedule["id"])
+            if self.db.has_active_command(bot_id=bot_id, command=command):
+                self.db.mark_repeat_schedule_error(
+                    schedule_id=schedule_id,
+                    message="pending/running command exists",
+                )
+                logger.debug(
+                    "repeat_schedule_skipped_active_command bot_id=%s command=%s schedule_id=%s",
+                    bot_id,
+                    command,
+                    schedule_id,
+                )
+                continue
+            try:
+                payload = self._decode_schedule_payload(schedule)
+                queued = self.queue_bot_command(bot_id=bot_id, command=command, payload=payload)
+            except Exception as exc:
+                self.db.mark_repeat_schedule_error(schedule_id=schedule_id, message=str(exc))
+                logger.warning(
+                    "repeat_schedule_queue_failed bot_id=%s command=%s schedule_id=%s reason=%s",
+                    bot_id,
+                    command,
+                    schedule_id,
+                    exc,
+                )
+                continue
+
+            interval_sec = max(1, int(schedule["interval_sec"]))
+            next_run_at = to_utc_iso(now_dt + timedelta(seconds=interval_sec))
+            updated_schedule = self.db.mark_repeat_schedule_queued(
+                schedule_id=schedule_id,
+                command_id=int(queued["id"]),
+                next_run_at=next_run_at,
+            )
+            queued_results.append({"schedule": updated_schedule, "command": queued})
+            logger.info(
+                "repeat_schedule_command_enqueued bot_id=%s command=%s schedule_id=%s command_id=%s next_run_at=%s",
+                bot_id,
+                command,
+                schedule_id,
+                queued["id"],
+                next_run_at,
+            )
+        return queued_results
+
     def _normalize_command_payload(
         self,
         *,
@@ -285,6 +449,8 @@ class ControlTowerService:
             raise ValueError("expected tax amount commands are only allowed for sender bots")
         if policy.reporter_only and bot.get("bot_type") != "reporter":
             raise ValueError("tax report submit commands are only allowed for reporter bots")
+        if bot.get("bot_type") == "reporter" and not policy.preserves_repeat_schedule:
+            self.db.disable_repeat_schedule(bot_id=bot_id, command=REPORTER_ONE_CLICK_COMMAND)
 
         queued = self.db.enqueue_command(
             pc_id=bot["pc_id"],
@@ -302,6 +468,7 @@ class ControlTowerService:
         return _sanitize_command_for_response(queued)
 
     def poll_agent_commands(self, pc_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        self.enqueue_due_repeat_commands()
         commands = self.db.poll_commands(pc_id=pc_id, limit=limit)
         logger.debug("command_polled pc_id=%s count=%s", pc_id, len(commands))
         return commands

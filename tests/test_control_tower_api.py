@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from income33.config import AppConfig, ControlTowerConfig
@@ -27,6 +29,50 @@ def build_client(tmp_path):
     service = ControlTowerService(db=db, bootstrap_agent_count=18)
     app = create_app(config=config, service=service)
     return TestClient(app)
+
+
+def _decoded_payload(command_or_schedule):
+    return json.loads(command_or_schedule["payload_json"])
+
+
+def _repeat_schedules(client, *, bot_id=None, command=None):
+    schedules = client.app.state.service.db.list_repeat_schedules()
+    if bot_id is not None:
+        schedules = [schedule for schedule in schedules if schedule["bot_id"] == bot_id]
+    if command is not None:
+        schedules = [schedule for schedule in schedules if schedule["command"] == command]
+    return schedules
+
+
+def _force_repeat_schedule_due(client, *, bot_id="reporter-01", command="submit_tax_reports"):
+    with client.app.state.service.db._connect() as conn:
+        conn.execute(
+            """
+            UPDATE repeat_schedules
+            SET next_run_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z'
+            WHERE bot_id = ? AND command = ?
+            """,
+            (bot_id, command),
+        )
+
+
+def _submit_tax_report_commands(client, *, bot_id="reporter-01"):
+    return [
+        command
+        for command in client.app.state.service.db.list_recent_commands(limit=100)
+        if command["bot_id"] == bot_id and command["command"] == "submit_tax_reports"
+    ]
+
+
+def _assert_reporter_none_one_click_payload(payload):
+    assert payload["tax_doc_ids"] == []
+    assert payload["one_click_submit"] is True
+    assert payload["tax_doc_custom_type_filter"] == "NONE"
+    assert payload["taxDocCustomTypeFilter"] == "NONE"
+    assert payload["workflow_filter_set"] == "SUBMIT_READY"
+    assert payload["review_type_filter"] == "NORMAL"
+    assert payload["max_auto_targets"] == 0
+    assert payload["_retry"]["interval_sec"] == 300
 
 
 def test_command_policy_centralizes_dashboard_allowlist_and_sender_only_guardrails():
@@ -68,6 +114,7 @@ def test_repeat_orchestration_policy_helpers_are_centralized():
         {"tax_doc_ids": [1], "repeat": True},
     ) is True
     assert should_schedule_repeated_send("status", {"repeat": True}) is False
+    assert should_schedule_repeated_send("submit_tax_reports", {"repeat": True}) is False
 
 
 def test_retry_policy_resolution_uses_command_policy_defaults_and_legacy_env(monkeypatch):
@@ -551,7 +598,7 @@ def test_dashboard_can_queue_sender_all_send_rate_based_bookkeeping_expected_tax
         assert '"tax_doc_custom_type_filter": "가"' in payload_json
 
 
-def test_dashboard_can_queue_reporter_all_one_click_submit(tmp_path):
+def test_reporter_one_click_repeat_is_stored_in_control_tower_and_queues_initial_command(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
@@ -560,28 +607,31 @@ def test_dashboard_can_queue_reporter_all_one_click_submit(tmp_path):
     )
 
     assert response.status_code == 303
+    schedules = _repeat_schedules(client, command="submit_tax_reports")
+    assert len(schedules) == 9
+    assert {schedule["bot_id"] for schedule in schedules} == {
+        f"reporter-{slot:02d}" for slot in range(1, 10)
+    }
+    for schedule in schedules:
+        assert schedule["enabled"] == 1
+        assert schedule["interval_sec"] == 300
+        _assert_reporter_none_one_click_payload(_decoded_payload(schedule))
+
     for slot in range(10, 19):
         polled = client.get(f"/api/agents/pc-{slot:02d}/commands/poll")
         assert polled.status_code == 200
         commands = polled.json()["commands"]
         assert len(commands) == 1
         assert commands[0]["command"] == "submit_tax_reports"
-        payload_json = commands[0]["payload_json"]
-        assert '"one_click_submit": true' in payload_json
-        assert '"tax_doc_ids": []' in payload_json
-        assert '"tax_doc_custom_type_filter": "NONE"' in payload_json
-        assert '"taxDocCustomTypeFilter": "NONE"' in payload_json
-        assert '"max_auto_targets": 0' in payload_json
-        assert '"maxAutoTargets": 0' in payload_json
-        assert '"repeat": true' in payload_json
-        assert '"_retry": {"interval_sec": 300' in payload_json
-        assert '"workflow_filter_set": "SUBMIT_READY"' in payload_json
-        assert '"workflowFilterSet": "SUBMIT_READY"' in payload_json
-        assert '"review_type_filter": "NORMAL"' in payload_json
-        assert '"reviewTypeFilter": "NORMAL"' in payload_json
-        assert '"sort": "SUBMIT_REQUEST_DATE_TIME"' in payload_json
-        assert '"sortField": "SUBMIT_REQUEST_DATE_TIME"' in payload_json
-        assert '"direction": "ASC"' in payload_json
+        payload = _decoded_payload(commands[0])
+        _assert_reporter_none_one_click_payload(payload)
+        assert payload["maxAutoTargets"] == 0
+        assert payload["repeat"] is True
+        assert payload["workflowFilterSet"] == "SUBMIT_READY"
+        assert payload["reviewTypeFilter"] == "NORMAL"
+        assert payload["sort"] == "SUBMIT_REQUEST_DATE_TIME"
+        assert payload["sortField"] == "SUBMIT_REQUEST_DATE_TIME"
+        assert payload["direction"] == "ASC"
 
 
 def test_dashboard_reporter_all_one_click_submit_forces_none_even_with_selected_custom_type(tmp_path):
@@ -767,19 +817,106 @@ def test_dashboard_can_queue_report_one_click_submit_without_taxdoc_ids(tmp_path
     )
 
     assert response.status_code == 303
+    schedules = _repeat_schedules(client, bot_id="reporter-01", command="submit_tax_reports")
+    assert len(schedules) == 1
+    assert schedules[0]["enabled"] == 1
+    assert schedules[0]["pc_id"] == "pc-10"
+    assert schedules[0]["interval_sec"] == 300
+    _assert_reporter_none_one_click_payload(_decoded_payload(schedules[0]))
+
     polled = client.get("/api/agents/pc-10/commands/poll")
     assert polled.status_code == 200
     commands = polled.json()["commands"]
     assert len(commands) == 1
     assert commands[0]["command"] == "submit_tax_reports"
-    assert '"tax_doc_ids": []' in commands[0]["payload_json"]
-    assert '"one_click_submit": true' in commands[0]["payload_json"]
-    assert '"tax_doc_custom_type_filter": "NONE"' in commands[0]["payload_json"]
-    assert '"taxDocCustomTypeFilter": "NONE"' in commands[0]["payload_json"]
-    assert '"max_auto_targets": 0' in commands[0]["payload_json"]
-    assert '"maxAutoTargets": 0' in commands[0]["payload_json"]
-    assert '"repeat": true' in commands[0]["payload_json"]
-    assert '"_retry": {"interval_sec": 300' in commands[0]["payload_json"]
+    payload = _decoded_payload(commands[0])
+    _assert_reporter_none_one_click_payload(payload)
+    assert payload["maxAutoTargets"] == 0
+    assert payload["repeat"] is True
+
+
+def test_control_tower_queues_due_reporter_submit_repeat_on_poll_without_reporter_memory(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   "},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    first_poll = client.get("/api/agents/pc-10/commands/poll")
+    first_commands = first_poll.json()["commands"]
+    assert len(first_commands) == 1
+    first_command_id = first_commands[0]["id"]
+    complete = client.post(f"/api/commands/{first_command_id}/complete", json={"status": "done"})
+    assert complete.status_code == 200
+
+    _force_repeat_schedule_due(client, bot_id="reporter-01")
+    due_poll = client.get("/api/agents/pc-10/commands/poll")
+    assert due_poll.status_code == 200
+    due_commands = due_poll.json()["commands"]
+    assert len(due_commands) == 1
+    assert due_commands[0]["command"] == "submit_tax_reports"
+    assert due_commands[0]["id"] != first_command_id
+    _assert_reporter_none_one_click_payload(_decoded_payload(due_commands[0]))
+
+
+def test_control_tower_repeat_does_not_pile_up_when_previous_command_pending_or_running(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   "},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    _force_repeat_schedule_due(client, bot_id="reporter-01")
+    other_pc_poll = client.get("/api/agents/pc-11/commands/poll")
+    assert other_pc_poll.status_code == 200
+
+    active_commands = [
+        command
+        for command in _submit_tax_report_commands(client, bot_id="reporter-01")
+        if command["status"] in {"pending", "running"}
+    ]
+    assert len(active_commands) == 1
+
+
+def test_stop_command_disables_reporter_submit_repeat_schedule(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   "},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    first_poll = client.get("/api/agents/pc-10/commands/poll")
+    first_command_id = first_poll.json()["commands"][0]["id"]
+    assert client.post(f"/api/commands/{first_command_id}/complete", json={"status": "done"}).status_code == 200
+
+    stop_response = client.post(
+        "/ui/bots/reporter-01/commands/stop",
+        follow_redirects=False,
+    )
+    assert stop_response.status_code == 303
+    schedules = _repeat_schedules(client, bot_id="reporter-01", command="submit_tax_reports")
+    assert len(schedules) == 1
+    assert schedules[0]["enabled"] == 0
+
+    _force_repeat_schedule_due(client, bot_id="reporter-01")
+    stop_poll = client.get("/api/agents/pc-10/commands/poll")
+    assert [command["command"] for command in stop_poll.json()["commands"]] == ["stop"]
+    stop_command_id = stop_poll.json()["commands"][0]["id"]
+    assert client.post(f"/api/commands/{stop_command_id}/complete", json={"status": "done"}).status_code == 200
+
+    repeat_poll = client.get("/api/agents/pc-10/commands/poll")
+    assert repeat_poll.status_code == 200
+    assert repeat_poll.json()["commands"] == []
+    submit_commands = _submit_tax_report_commands(client, bot_id="reporter-01")
+    assert len(submit_commands) == 1
 
 
 def test_dashboard_can_queue_report_one_click_status_check_without_taxdoc_ids(tmp_path):

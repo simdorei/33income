@@ -125,6 +125,23 @@ class Database:
                     finished_at TEXT,
                     error_message TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS repeat_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bot_id TEXT NOT NULL,
+                    pc_id TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    interval_sec INTEGER NOT NULL,
+                    next_run_at TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_queued_command_id INTEGER,
+                    last_queued_at TEXT,
+                    last_error_message TEXT,
+                    UNIQUE(bot_id, command)
+                );
                 """
             )
             self._ensure_columns(
@@ -341,6 +358,135 @@ class Database:
             "reporter_bots": reporter_bots,
             "bot_status_counts": status_counts,
         }
+
+    def upsert_repeat_schedule(
+        self,
+        *,
+        bot_id: str,
+        pc_id: str,
+        command: str,
+        payload: dict[str, Any],
+        interval_sec: int,
+        next_run_at: str,
+    ) -> dict[str, Any]:
+        now = now_utc_iso()
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO repeat_schedules (
+                    bot_id, pc_id, command, payload_json, interval_sec,
+                    next_run_at, enabled, created_at, updated_at,
+                    last_error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
+                ON CONFLICT(bot_id, command) DO UPDATE SET
+                    pc_id = excluded.pc_id,
+                    payload_json = excluded.payload_json,
+                    interval_sec = excluded.interval_sec,
+                    next_run_at = excluded.next_run_at,
+                    enabled = 1,
+                    updated_at = excluded.updated_at,
+                    last_error_message = NULL
+                """,
+                (bot_id, pc_id, command, payload_json, interval_sec, next_run_at, now, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM repeat_schedules WHERE bot_id = ? AND command = ?",
+                (bot_id, command),
+            ).fetchone()
+        return self._row_to_dict(row)  # type: ignore[arg-type]
+
+    def disable_repeat_schedule(self, *, bot_id: str, command: str) -> dict[str, Any] | None:
+        now = now_utc_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE repeat_schedules
+                SET enabled = 0, updated_at = ?
+                WHERE bot_id = ? AND command = ?
+                """,
+                (now, bot_id, command),
+            )
+            row = conn.execute(
+                "SELECT * FROM repeat_schedules WHERE bot_id = ? AND command = ?",
+                (bot_id, command),
+            ).fetchone()
+        return self._row_to_dict(row)
+
+    def list_repeat_schedules(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM repeat_schedules ORDER BY bot_id ASC, command ASC"
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_due_repeat_schedules(self, now: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM repeat_schedules
+                WHERE enabled = 1 AND next_run_at <= ?
+                ORDER BY next_run_at ASC, id ASC
+                """,
+                (now,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def mark_repeat_schedule_queued(
+        self,
+        *,
+        schedule_id: int,
+        command_id: int,
+        next_run_at: str,
+    ) -> dict[str, Any]:
+        now = now_utc_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE repeat_schedules
+                SET next_run_at = ?,
+                    updated_at = ?,
+                    last_queued_command_id = ?,
+                    last_queued_at = ?,
+                    last_error_message = NULL
+                WHERE id = ?
+                """,
+                (next_run_at, now, command_id, now, schedule_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM repeat_schedules WHERE id = ?",
+                (schedule_id,),
+            ).fetchone()
+        return self._row_to_dict(row)  # type: ignore[arg-type]
+
+    def mark_repeat_schedule_error(self, *, schedule_id: int, message: str) -> dict[str, Any] | None:
+        now = now_utc_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE repeat_schedules
+                SET updated_at = ?, last_error_message = ?
+                WHERE id = ?
+                """,
+                (now, message, schedule_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM repeat_schedules WHERE id = ?",
+                (schedule_id,),
+            ).fetchone()
+        return self._row_to_dict(row)
+
+    def has_active_command(self, *, bot_id: str, command: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM commands
+                WHERE bot_id = ? AND command = ? AND status IN ('pending', 'running')
+                LIMIT 1
+                """,
+                (bot_id, command),
+            ).fetchone()
+        return row is not None
 
     def enqueue_command(
         self,
