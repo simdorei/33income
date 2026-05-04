@@ -96,6 +96,84 @@ def register_bot_command_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/", status_code=303)
 
+    def _queue_command_for_all_bots(
+        *,
+        bot_type: str,
+        command: str,
+        payload: dict[str, Any] | None,
+        log_label: str,
+    ) -> RedirectResponse:
+        bots = sorted(
+            app.state.service.list_bots(bot_type=bot_type),
+            key=lambda row: str(row.get("bot_id") or ""),
+        )
+        if not bots:
+            logger.warning("%s_no_targets bot_type=%s", log_label, bot_type)
+            raise HTTPException(status_code=404, detail=f"no bots found for type={bot_type}")
+
+        queued_count = 0
+        for bot in bots:
+            bot_id = str(bot.get("bot_id") or "")
+            if not bot_id:
+                continue
+            try:
+                app.state.service.queue_bot_command(
+                    bot_id=bot_id,
+                    command=command,
+                    payload=dict(payload or {}),
+                )
+            except ValueError as exc:
+                logger.warning("%s_rejected bot_id=%s reason=%s", log_label, bot_id, exc)
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            queued_count += 1
+
+        logger.info(
+            "%s_done bot_type=%s command=%s queued_count=%s",
+            log_label,
+            bot_type,
+            command,
+            queued_count,
+        )
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/commands/senders/send-expected-tax-amounts-all")
+    def queue_sender_all_send_expected_tax_amounts() -> RedirectResponse:
+        return _queue_command_for_all_bots(
+            bot_type="sender",
+            command="send_expected_tax_amounts",
+            payload={},
+            log_label="queue_sender_all_send_expected_tax_amounts",
+        )
+
+    @app.post("/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all")
+    def queue_sender_all_send_simple_expense_rate_expected_tax_amounts() -> RedirectResponse:
+        return _queue_command_for_all_bots(
+            bot_type="sender",
+            command="send_simple_expense_rate_expected_tax_amounts",
+            payload={},
+            log_label="queue_sender_all_send_simple_expense_rate_expected_tax_amounts",
+        )
+
+    @app.post("/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all")
+    def queue_sender_all_send_rate_based_bookkeeping_expected_tax_amounts() -> RedirectResponse:
+        payload_data = {"tax_doc_ids": []}
+        payload_data.update(rate_based_bookkeeping_auto_filter_payload())
+        return _queue_command_for_all_bots(
+            bot_type="sender",
+            command="send_rate_based_bookkeeping_expected_tax_amounts",
+            payload=payload_data,
+            log_label="queue_sender_all_send_rate_based_bookkeeping_expected_tax_amounts",
+        )
+
+    @app.post("/ui/commands/reporters/submit-tax-reports-one-click-all")
+    def queue_reporter_all_submit_tax_reports_one_click() -> RedirectResponse:
+        return _queue_command_for_all_bots(
+            bot_type="reporter",
+            command="submit_tax_reports",
+            payload={"tax_doc_ids": [], "one_click_submit": True},
+            log_label="queue_reporter_all_submit_tax_reports_one_click",
+        )
+
     @app.post("/ui/bots/{bot_id}/rate-based-bookkeeping-send-list")
     async def queue_rate_based_bookkeeping_send_list(bot_id: str, request: Request) -> RedirectResponse:
         return await _queue_tax_doc_id_list_command(

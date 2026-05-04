@@ -2135,7 +2135,7 @@ def submit_tax_reports(
             year = _resolve_taxdoc_year(payload)
             workflow_filter_set = str(payload.get("workflow_filter_set") or payload.get("workflowFilterSet") or "SUBMIT_READY")
             tax_doc_custom_type_filter = str(
-                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "NONE"
+                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "ALL"
             )
             review_type_filter = str(payload.get("review_type_filter") or payload.get("reviewTypeFilter") or "NORMAL")
             apply_expense_rate_type_filter = str(

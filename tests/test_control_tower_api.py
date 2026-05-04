@@ -170,8 +170,16 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "수동 신고준비(고급)" in root.text
     assert "수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
     assert "자동조회 신고제출 실행" in root.text
-    assert "입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회" in root.text
-    assert "SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 20건씩 신고제출" in root.text
+    assert "입력칸 없이 SUBMIT_READY/유형 ALL/검토 NORMAL 대상을 자동조회" in root.text
+    assert "SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출" in root.text
+    assert "전체 계산발송" in root.text
+    assert "전체 단순경비율 목록발송" in root.text
+    assert "전체 경비율 장부발송" in root.text
+    assert "전체 자동조회 신고제출 실행" in root.text
+    assert "/ui/commands/senders/send-expected-tax-amounts-all" in root.text
+    assert "/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all" in root.text
+    assert "/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all" in root.text
+    assert "/ui/commands/reporters/submit-tax-reports-one-click-all" in root.text
     assert "고급: 수동 taxDocId 지정" in root.text
     assert "진행중 상태재확인" in root.text
     assert "status GET만 실행" in root.text
@@ -481,6 +489,81 @@ def test_dashboard_can_queue_login_command(tmp_path):
     commands = polled.json()["commands"]
     assert len(commands) == 1
     assert commands[0]["command"] == "open_login"
+
+
+def test_dashboard_can_queue_sender_all_send_expected_tax_amounts(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/commands/senders/send-expected-tax-amounts-all",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    for slot in range(1, 10):
+        polled = client.get(f"/api/agents/pc-{slot:02d}/commands/poll")
+        assert polled.status_code == 200
+        commands = polled.json()["commands"]
+        assert len(commands) == 1
+        assert commands[0]["command"] == "send_expected_tax_amounts"
+
+
+def test_dashboard_can_queue_sender_all_send_simple_expense_rate_expected_tax_amounts(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    for slot in range(1, 10):
+        polled = client.get(f"/api/agents/pc-{slot:02d}/commands/poll")
+        assert polled.status_code == 200
+        commands = polled.json()["commands"]
+        assert len(commands) == 1
+        assert commands[0]["command"] == "send_simple_expense_rate_expected_tax_amounts"
+
+
+def test_dashboard_can_queue_sender_all_send_rate_based_bookkeeping_expected_tax_amounts(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    for slot in range(1, 10):
+        polled = client.get(f"/api/agents/pc-{slot:02d}/commands/poll")
+        assert polled.status_code == 200
+        commands = polled.json()["commands"]
+        assert len(commands) == 1
+        assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
+        payload_json = commands[0]["payload_json"]
+        assert '"tax_doc_ids": []' in payload_json
+        assert '"workflow_filter_set": "REVIEW_WAITING"' in payload_json
+        assert '"tax_doc_custom_type_filter": "가"' in payload_json
+
+
+def test_dashboard_can_queue_reporter_all_one_click_submit(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/commands/reporters/submit-tax-reports-one-click-all",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    for slot in range(10, 19):
+        polled = client.get(f"/api/agents/pc-{slot:02d}/commands/poll")
+        assert polled.status_code == 200
+        commands = polled.json()["commands"]
+        assert len(commands) == 1
+        assert commands[0]["command"] == "submit_tax_reports"
+        payload_json = commands[0]["payload_json"]
+        assert '"one_click_submit": true' in payload_json
+        assert '"tax_doc_ids": []' in payload_json
 
 
 def test_dashboard_rejects_hidden_auto_bulk_buttons_by_direct_ui_route(tmp_path):

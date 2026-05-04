@@ -66,6 +66,54 @@ def _submit_auth_code_form(bot_id: str) -> str:
     )
 
 
+def _all_bots_action_form(*, action: str, label: str, confirm_message: str, hint: str | None = None) -> str:
+    safe_action = escape(action, quote=True)
+    safe_label = escape(label)
+    safe_confirm = escape(confirm_message, quote=True)
+    hint_html = ""
+    if hint:
+        hint_html = f"<span class='hint'>{escape(hint)}</span>"
+    return (
+        f"<form method='post' action='{safe_action}' class='inline-form' style='display:inline'>"
+        "<button type='submit' class='send' "
+        f"onclick=\"return confirm('{safe_confirm}')\">"
+        f"{safe_label}</button>"
+        f"{hint_html}"
+        "</form>"
+    )
+
+
+def _global_bulk_actions_html() -> str:
+    return " ".join(
+        [
+            _all_bots_action_form(
+                action="/ui/commands/senders/send-expected-tax-amounts-all",
+                label="전체 계산발송",
+                confirm_message="sender 전체(01~09)에 계산발송을 큐잉할까요?",
+                hint="sender 01~09 전체",
+            ),
+            _all_bots_action_form(
+                action="/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all",
+                label="전체 단순경비율 목록발송",
+                confirm_message="sender 전체(01~09)에 단순경비율 목록발송을 큐잉할까요?",
+                hint="sender 01~09 전체",
+            ),
+            _all_bots_action_form(
+                action="/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all",
+                label="전체 경비율 장부발송",
+                confirm_message="sender 전체(01~09)에 경비율 장부발송(자동조회)을 큐잉할까요?",
+                hint=rate_based_bookkeeping_auto_hint(),
+            ),
+            _all_bots_action_form(
+                action="/ui/commands/reporters/submit-tax-reports-one-click-all",
+                label="전체 자동조회 신고제출 실행",
+                confirm_message="reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉할까요?",
+                hint="SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출",
+            ),
+        ]
+    )
+
+
 def _taxdoc_id_list_rate_based_bookkeeping_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
     safe_confirm = escape(rate_based_bookkeeping_auto_confirm_message(), quote=True)
@@ -102,9 +150,9 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
     return (
         f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회하고 20건씩 순차 실행할까요?')\">"
+        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/유형 ALL/검토 NORMAL 대상을 자동조회하고 20건씩 순차 실행할까요?')\">"
         "자동조회 신고제출 실행</button>"
-        "<span class='hint'>SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 20건씩 신고제출</span>"
+        "<span class='hint'>SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출</span>"
         "</form>"
         "<details class='advanced-action' style='display:inline'>"
         "<summary>고급: 수동 taxDocId 지정</summary>"
@@ -225,6 +273,7 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
     summary_items = "".join(
         f"<li><strong>{escape(str(key))}</strong>: {escape(str(value))}</li>" for key, value in summary.items()
     )
+    global_bulk_actions_html = _global_bulk_actions_html()
 
     agent_columns = [
         "pc_id",
@@ -300,6 +349,12 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
           <h2>요약</h2>
           <ul>{summary_items}</ul>
           <p>API: <code>/api/summary</code>, <code>/api/agents</code>, <code>/api/bots</code></p>
+        </div>
+
+        <div class='card'>
+          <h2>전체 실행</h2>
+          <p>각 버튼은 대상 봇 전체(발송 01~09 / 신고 01~09)에 동일 명령을 일괄 큐잉합니다.</p>
+          {global_bulk_actions_html}
         </div>
 
         <div class='card'>

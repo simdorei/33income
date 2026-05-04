@@ -1877,7 +1877,7 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
             fetched_pages.append(int(query["page"][0]))
             assert query["officeId"] == ["327"]
             assert query["workflowFilterSet"] == ["SUBMIT_READY"]
-            assert query["taxDocCustomTypeFilter"] == ["NONE"]
+            assert query["taxDocCustomTypeFilter"] == ["ALL"]
             assert query["reviewTypeFilter"] == ["NORMAL"]
             assert query["sort"] == ["SUBMIT_REQUEST_DATE_TIME"]
             assert query["direction"] == ["ASC"]
