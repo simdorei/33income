@@ -164,12 +164,16 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "/ui/bots/sender-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
     assert "return confirm" in root.text
-    assert "신고준비(음수항목 보정)" in root.text
-    assert "신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
-    assert "원클릭 신고제출" in root.text
-    assert "실제 최종 신고제출입니다" in root.text
-    assert "원클릭 상태재확인" in root.text
-    assert "진행중 건 상태만 재확인합니다" in root.text
+    assert "수동 신고준비(고급)" in root.text
+    assert "수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
+    assert "자동조회 신고제출 실행" in root.text
+    assert "입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회" in root.text
+    assert "SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 20건씩 신고제출" in root.text
+    assert "고급: 수동 taxDocId 지정" in root.text
+    assert "진행중 상태재확인" in root.text
+    assert "status GET만 실행" in root.text
+    assert "원클릭 신고제출" not in root.text
+    assert "원클릭 상태재확인" not in root.text
     assert "/ui/bots/reporter-01/tax-report-submit-list" in root.text
     assert "/ui/bots/reporter-01/tax-report-one-click-submit-list" in root.text
     assert "/ui/bots/reporter-01/tax-report-one-click-submit-status-check-list" in root.text

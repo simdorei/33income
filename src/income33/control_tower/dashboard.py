@@ -78,41 +78,59 @@ def _taxdoc_id_list_tax_report_submit_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
     return (
         f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-submit-list' "
-        "class='inline-form' style='display:inline'>"
+        "class='inline-form advanced-action' style='display:inline'>"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='신고준비 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "placeholder='고급 수동 신고준비 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 신고준비(담당자 배정+음수항목 보정)만 순차 실행할까요?')\">"
-        "신고준비(음수항목 보정)</button>"
+        "onclick=\"return confirm('붙여넣은 taxDocId 목록으로 수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행할까요?')\">"
+        "수동 신고준비(고급)</button>"
         "</form>"
     )
 
 
 def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
+    action = f"/ui/bots/{safe_bot_id}/tax-report-one-click-submit-list"
     return (
-        f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-list' "
-        "class='inline-form' style='display:inline'>"
-        "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='신고제출 taxDocId 목록(비우면 SUBMIT_READY/NONE/NORMAL 전체 자동조회 후 20건씩 실행)'></textarea>"
+        f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. taxDocId 목록이 비어있으면 SUBMIT_READY/NONE/NORMAL 전체를 자동조회하고 20건씩 순차 실행할까요?')\">"
-        "원클릭 신고제출</button>"
+        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회하고 20건씩 순차 실행할까요?')\">"
+        "자동조회 신고제출 실행</button>"
+        "<span class='hint'>SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 20건씩 신고제출</span>"
         "</form>"
+        "<details class='advanced-action' style='display:inline'>"
+        "<summary>고급: 수동 taxDocId 지정</summary>"
+        f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='선택사항: 특정 taxDocId만 수동 신고제출(비우면 자동조회)'></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('입력한 taxDocId만 수동 신고제출합니다. 비어있으면 자동조회 모드로 실행됩니다. 진행할까요?')\">"
+        "수동 ID목록 신고제출</button>"
+        "</form>"
+        "</details>"
     )
 
 
 def _taxdoc_id_list_tax_report_one_click_status_check_form(bot_id: str) -> str:
     safe_bot_id = escape(bot_id, quote=True)
+    action = f"/ui/bots/{safe_bot_id}/tax-report-one-click-submit-status-check-list"
     return (
-        f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-status-check-list' "
-        "class='inline-form' style='display:inline'>"
-        "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='상태재확인 taxDocId 목록(비우면 진행중 로그에서 자동조회)'></textarea>"
+        f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('진행중 건 상태만 재확인합니다. 신고제출 PUT 없이 status 조회만 실행할까요?')\">"
-        "원클릭 상태재확인</button>"
+        "onclick=\"return confirm('진행중 건 상태만 재확인합니다. 신고제출 PUT 없이 status GET만 실행할까요?')\">"
+        "진행중 상태재확인</button>"
+        "<span class='hint'>IN_PROGRESS 기록 기준, PUT 없이 status GET만 호출</span>"
         "</form>"
+        "<details class='advanced-action' style='display:inline'>"
+        "<summary>고급: 상태재확인 taxDocId 지정</summary>"
+        f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='선택사항: 상태재확인 taxDocId 목록(비우면 진행중 로그에서 자동조회)'></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('입력한 건 상태만 재확인합니다. 신고제출 PUT 없이 status GET만 실행할까요?')\">"
+        "수동 상태재확인</button>"
+        "</form>"
+        "</details>"
     )
 
 
