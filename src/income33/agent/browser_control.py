@@ -2597,6 +2597,12 @@ def submit_tax_reports(
                 continue
 
             business_data = business_json.get("data") or {}
+            item_failed = False
+            calculation_type = _calculation_type_from_value(business_data)
+            if calculation_type == "ESTIMATE":
+                eligible_tax_doc_ids.append(normalized_tax_doc_id)
+                continue
+
             summary = business_data.get("summary") if isinstance(business_data, dict) else {}
             item_list = summary.get("itemList") if isinstance(summary, dict) else []
             if not isinstance(item_list, list):
@@ -2612,11 +2618,6 @@ def submit_tax_reports(
                     continue
                 business_numbers.append(raw_business_number)
 
-            item_failed = False
-            calculation_type = _calculation_type_from_value(business_data)
-            if calculation_type == "ESTIMATE":
-                eligible_tax_doc_ids.append(normalized_tax_doc_id)
-                continue
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
                 query = urlencode({"businessNumber": business_number, "businessIncomeType": business_income_type})
