@@ -693,7 +693,7 @@ def test_dashboard_rejects_too_many_taxdoc_ids(tmp_path):
     assert "exceeds max 500" in response.text
 
 
-def test_dashboard_rejects_empty_taxdoc_id_list(tmp_path):
+def test_dashboard_can_queue_rate_based_bookkeeping_send_list_without_taxdoc_ids(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
@@ -702,8 +702,13 @@ def test_dashboard_rejects_empty_taxdoc_id_list(tmp_path):
         follow_redirects=False,
     )
 
-    assert response.status_code == 400
-    assert "tax_doc_ids is required" in response.text
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
+    assert '"tax_doc_ids": []' in commands[0]["payload_json"]
 
 
 def test_dashboard_can_queue_auth_code_command(tmp_path):

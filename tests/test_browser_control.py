@@ -1161,9 +1161,10 @@ def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_
         fake_send_rate_based_bookkeeping_expected_tax_amount,
     )
 
+    base_payload = {"year": 2025, "size": 20, "force_refresh": True}
     result = browser_control.send_rate_based_bookkeeping_expected_tax_amounts(
         bot_id="sender-01",
-        payload={"year": 2025, "size": 20, "force_refresh": True},
+        payload=base_payload,
     )
 
     assert result["ok"] is True
@@ -1172,8 +1173,22 @@ def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_
     assert result["failed_count"] == 0
     assert result["tax_doc_ids"] == [1348568, 1348569]
     assert "일괄 경비율 장부발송 완료" in result["current_step"]
-    assert calls == [
-        ("preview", "sender-01", {"year": 2025, "size": 20, "force_refresh": True}),
+
+    preview_call = calls[0]
+    assert preview_call[0] == "preview"
+    assert preview_call[1] == "sender-01"
+    assert preview_call[2]["year"] == 2025
+    assert preview_call[2]["size"] == 20
+    assert preview_call[2]["force_refresh"] is True
+    assert preview_call[2]["workflow_filter_set"] == "REVIEW_WAITING"
+    assert preview_call[2]["tax_doc_custom_type_filter"] == "가"
+    assert preview_call[2]["review_type_filter"] == "ALL"
+    assert preview_call[2]["apply_expense_rate_type_filter"] == "ALL"
+    assert preview_call[2]["sort"] == "REVIEW_REQUEST_DATE_TIME"
+    assert preview_call[2]["direction"] == "ASC"
+    assert preview_call[2]["scan_order"] == "forward"
+
+    assert calls[1:] == [
         (
             "send",
             "sender-01",
@@ -1185,6 +1200,98 @@ def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_
             {"year": 2025, "size": 20, "force_refresh": True, "tax_doc_id": 1348569},
         ),
     ]
+
+
+def test_preview_rate_based_bookkeeping_expected_tax_amounts_uses_review_waiting_custom_filters(monkeypatch):
+    fetched_query = {}
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": [{"id": 325}, {"id": 326}, {"id": 327}, {"id": 328}, {"id": 329}],
+                },
+            }
+
+        assert "/api/tax/v1/taxdocs/filter-search" in url
+        query = parse_qs(urlparse(url).query)
+        fetched_query.update(query)
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "content": [{"taxDocId": 91001}, {"taxDocId": 91002}],
+                    "totalElements": 2,
+                    "totalPages": 1,
+                },
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.preview_rate_based_bookkeeping_expected_tax_amounts(
+        bot_id="sender-05",
+        payload={"year": 2025, "size": 20},
+    )
+
+    assert result["tax_doc_ids"] == [91001, 91002]
+    assert result["count"] == 2
+    assert result["current_step"] == "일괄세션 확인 2건"
+    assert fetched_query["officeId"] == ["329"]
+    assert fetched_query["workflowFilterSet"] == ["REVIEW_WAITING"]
+    assert fetched_query["taxDocCustomTypeFilter"] == ["가"]
+    assert fetched_query["reviewTypeFilter"] == ["ALL"]
+    assert fetched_query["applyExpenseRateTypeFilter"] == ["ALL"]
+    assert fetched_query["taxDocServiceCodeTypeFilter"] == ["C0"]
+    assert fetched_query["year"] == ["2025"]
+    assert fetched_query["sort"] == ["REVIEW_REQUEST_DATE_TIME"]
+    assert fetched_query["direction"] == ["ASC"]
+    assert fetched_query["page"] == ["0"]
+    assert fetched_query["size"] == ["20"]
+
+
+def test_send_rate_based_bookkeeping_expected_tax_amounts_keeps_manual_taxdoc_ids_mode(monkeypatch):
+    calls = []
+
+    def fail_preview(*args, **kwargs):
+        raise AssertionError("preview should not be called when explicit tax_doc_ids are provided")
+
+    def fake_send_rate_based_bookkeeping_expected_tax_amount(*, bot_id, payload, logger):
+        calls.append((bot_id, payload["tax_doc_id"]))
+        return {
+            "ok": True,
+            "status": "session_active",
+            "tax_doc_id": payload["tax_doc_id"],
+            "current_step": f"단건 계산발송 완료 taxDocId={payload['tax_doc_id']}",
+        }
+
+    monkeypatch.setattr(browser_control, "preview_rate_based_bookkeeping_expected_tax_amounts", fail_preview)
+    monkeypatch.setattr(
+        browser_control,
+        "send_rate_based_bookkeeping_expected_tax_amount",
+        fake_send_rate_based_bookkeeping_expected_tax_amount,
+    )
+
+    result = browser_control.send_rate_based_bookkeeping_expected_tax_amounts(
+        bot_id="sender-01",
+        payload={"tax_doc_ids": [2001, 2002]},
+    )
+
+    assert result["ok"] is True
+    assert result["sent_count"] == 2
+    assert result["skipped_count"] == 0
+    assert result["failed_count"] == 0
+    assert result["tax_doc_ids"] == [2001, 2002]
+    assert calls == [("sender-01", 2001), ("sender-01", 2002)]
 
 
 def test_refresh_page_force_reload_calls_browser_reload(monkeypatch):

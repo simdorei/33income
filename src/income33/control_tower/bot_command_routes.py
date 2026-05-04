@@ -100,6 +100,7 @@ def register_bot_command_routes(app: FastAPI) -> None:
             request=request,
             command="send_rate_based_bookkeeping_expected_tax_amounts",
             log_label="queue_rate_based_bookkeeping_send_list",
+            allow_empty_tax_doc_ids=True,
         )
 
     @app.post("/ui/bots/{bot_id}/tax-report-submit-list")

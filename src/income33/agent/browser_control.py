@@ -4331,7 +4331,24 @@ def preview_rate_based_bookkeeping_expected_tax_amounts(
     """
     logger = logger or logging.getLogger("income33.agent.browser_control")
     payload = payload or {}
-    preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=payload, logger=logger)
+
+    preview_payload = dict(payload)
+
+    def _set_default_pair(snake_key: str, camel_key: str, value: Any) -> None:
+        if snake_key in preview_payload or camel_key in preview_payload:
+            return
+        preview_payload[snake_key] = value
+
+    _set_default_pair("workflow_filter_set", "workflowFilterSet", "REVIEW_WAITING")
+    _set_default_pair("tax_doc_custom_type_filter", "taxDocCustomTypeFilter", "가")
+    _set_default_pair("review_type_filter", "reviewTypeFilter", "ALL")
+    _set_default_pair("apply_expense_rate_type_filter", "applyExpenseRateTypeFilter", "ALL")
+    _set_default_pair("sort", "sortField", "REVIEW_REQUEST_DATE_TIME")
+    if "direction" not in preview_payload:
+        preview_payload["direction"] = "ASC"
+    _set_default_pair("scan_order", "scanOrder", "forward")
+
+    preview = preview_expected_tax_send_targets(bot_id=bot_id, payload=preview_payload, logger=logger)
     tax_doc_ids = [int(tax_doc_id) for tax_doc_id in preview.get("tax_doc_ids") or []]
     result = dict(preview)
     result["tax_doc_ids"] = tax_doc_ids
