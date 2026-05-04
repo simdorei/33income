@@ -11,12 +11,16 @@ async def read_form_value(request: Request, field_name: str) -> str:
     return parse_qs(raw_body).get(field_name, [""])[0].strip()
 
 
-def parse_tax_doc_ids(raw_tax_doc_ids: str) -> list[int]:
+def parse_tax_doc_ids(raw_tax_doc_ids: str, *, allow_empty: bool = False) -> list[int]:
     if not raw_tax_doc_ids:
+        if allow_empty:
+            return []
         raise HTTPException(status_code=400, detail="tax_doc_ids is required")
 
     tokens = [token for token in re.split(r"[\s,]+", raw_tax_doc_ids) if token]
     if not tokens:
+        if allow_empty:
+            return []
         raise HTTPException(status_code=400, detail="tax_doc_ids is required")
     if len(tokens) > 500:
         raise HTTPException(status_code=400, detail="tax_doc_ids exceeds max 500")

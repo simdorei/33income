@@ -69,8 +69,12 @@ def register_bot_command_routes(app: FastAPI) -> None:
         command: str,
         log_label: str,
         extra_payload: dict[str, Any] | None = None,
+        allow_empty_tax_doc_ids: bool = False,
     ) -> RedirectResponse:
-        tax_doc_ids = parse_tax_doc_ids(await read_form_value(request, "tax_doc_ids"))
+        tax_doc_ids = parse_tax_doc_ids(
+            await read_form_value(request, "tax_doc_ids"),
+            allow_empty=allow_empty_tax_doc_ids,
+        )
 
         try:
             payload_data: dict[str, Any] = {"tax_doc_ids": tax_doc_ids}
@@ -118,4 +122,5 @@ def register_bot_command_routes(app: FastAPI) -> None:
             command="submit_tax_reports",
             log_label="queue_tax_report_one_click_submit_list",
             extra_payload={"one_click_submit": True},
+            allow_empty_tax_doc_ids=True,
         )

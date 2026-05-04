@@ -1427,13 +1427,25 @@ def test_submit_tax_reports_marks_business_income_lookup_failure_and_continues(m
 
 def test_submit_tax_reports_one_click_polls_until_success_without_second_start(monkeypatch):
     calls = []
-    status_responses = ["IN_PROGRESS", "COMPLETED"]
+    status_responses = ["IN_PROGRESS"]
 
     def fake_run_in_cdp_session(bot_id, payload, callback):
         return callback(FakePage(), 29301)
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            assert headers["x-host"] == "GROUND"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert method == "PUT"
+            assert headers["x-host"] == "GIT"
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [3001]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            assert method == "GET"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+
         assert headers == {
             "accept": "application/json, text/plain, */*",
             "x-host": "GIT",
@@ -1469,14 +1481,16 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
 
     assert result["ok"] is True
     assert result["mode"] == "one_click_submit"
-    assert result["success_count"] == 1
+    assert result["success_count"] == 0
+    assert result["in_progress_count"] == 1
     assert result["failed_count"] == 0
-    assert result["current_step"].startswith("신고제출 완료 성공=1건 패스=0건 실패=0건")
+    assert result["current_step"].startswith("신고제출 완료 성공=0건 진행중=1건")
     assert result["results"][0]["submit_category"] == "TA_ONECLICK"
-    assert result["results"][0]["final_status"] == "COMPLETED"
-    assert result["results"][0]["poll_count"] == 2
-    assert sum(1 for call in calls if call["method"] == "PUT") == 1
-    assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 2
+    assert result["results"][0]["status"] == "in_progress"
+    assert result["results"][0]["final_status"] == "IN_PROGRESS"
+    assert result["results"][0]["poll_count"] == 1
+    assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 1
+    assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
 
 
 def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(monkeypatch, tmp_path):
@@ -1488,6 +1502,14 @@ def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(mon
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3002/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
@@ -1523,14 +1545,14 @@ def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(mon
     assert result["failures"][0]["tax_doc_id"] == 3001
     assert result["failures"][0]["stage"] == "ta_submit_start"
     assert result["failures"][0]["submit_category"] == "TA_ONECLICK"
-    assert sum(1 for call in calls if call["method"] == "PUT") == 2
+    assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 2
     assert not any(call["url"].endswith("/submit/3001/ta-submit/status") for call in calls)
     log_text = (tmp_path / "tax_report_submit_responses.jsonl").read_text(encoding="utf-8")
     assert "TEST_START_FAILED" in log_text
     assert "access-token" not in log_text
 
 
-def test_submit_tax_reports_one_click_status_timeout_logs_failure_without_second_start(monkeypatch, tmp_path):
+def test_submit_tax_reports_one_click_in_progress_is_recorded_and_moves_on(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
 
@@ -1539,6 +1561,12 @@ def test_submit_tax_reports_one_click_status_timeout_logs_failure_without_second
 
     def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
         calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
@@ -1563,17 +1591,124 @@ def test_submit_tax_reports_one_click_status_timeout_logs_failure_without_second
         payload={"tax_doc_ids": [3001], "submit_mode": "ta-submit", "poll_interval_sec": 0, "poll_timeout_sec": 0},
     )
 
-    assert result["ok"] is False
-    assert result["status"] == "manual_required"
+    assert result["ok"] is True
+    assert result["status"] == "session_active"
     assert result["success_count"] == 0
-    assert result["failed_count"] == 1
-    assert result["failures"][0]["stage"] == "ta_submit_status_timeout"
-    assert result["failures"][0]["final_status"] == "IN_PROGRESS"
-    assert result["failures"][0]["poll_count"] == 1
-    assert sum(1 for call in calls if call["method"] == "PUT") == 1
+    assert result["in_progress_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["results"][0]["status"] == "in_progress"
+    assert result["results"][0]["final_status"] == "IN_PROGRESS"
+    assert result["results"][0]["poll_count"] == 1
+    assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 1
     assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
-    summary_text = (tmp_path / "tax_report_submit_failures.txt").read_text(encoding="utf-8")
-    assert "poll timeout after 0s status=IN_PROGRESS" in summary_text
+
+
+def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_filters(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 327}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query["officeId"] == ["327"]
+            assert query["workflowFilterSet"] == ["SUBMIT_READY"]
+            assert query["taxDocCustomTypeFilter"] == ["NONE"]
+            assert query["reviewTypeFilter"] == ["NORMAL"]
+            assert query["sort"] == ["SUBMIT_REQUEST_DATE_TIME"]
+            assert query["direction"] == ["ASC"]
+            assert query["size"] == ["20"]
+            assert query["page"] == ["0"]
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"content": [{"taxDocId": 4101}], "totalElements": 1, "totalPages": 1},
+                },
+            }
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [4101]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/4101/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+        if url.endswith("/api/tax/v1/gitax/submit/4101/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/4101/ta-submit"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/4101/ta-submit/status"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"status": "IN_PROGRESS", "errorMessage": None}},
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(bot_id="reporter-01", payload={"one_click_submit": True})
+
+    assert result["ok"] is True
+    assert result["tax_doc_ids"] == [4101]
+    assert result["attempted_count"] == 1
+    assert result["in_progress_count"] == 1
+
+
+def test_submit_tax_reports_one_click_minus_amount_failure_sets_custom_type_ah_and_skips_submit(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/5001/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"summary": {"itemList": [{"사업자번호": "123-45-67890"}]}}},
+            }
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/5002/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+        if url.endswith("bookkeeping/5001/minus-amount/correction?businessNumber=123-45-67890&businessIncomeType=BUSINESS"):
+            return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "DIFF_400"}}}
+        if url.endswith("/api/tax/v1/taxdocs/5001/custom-type"):
+            assert method == "PUT"
+            assert json_body == {"customType": "아"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/submit/5002/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/5002/ta-submit"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/5002/ta-submit/status"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"status": "IN_PROGRESS"}}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [5001, 5002], "one_click_submit": True},
+    )
+
+    assert result["failed_count"] == 1
+    assert result["in_progress_count"] == 1
+    assert result["failures"][0]["tax_doc_id"] == 5001
+    assert result["failures"][0]["stage"] == "minus_amount_correction"
+    assert result["failures"][0]["custom_type"] == "아"
+    assert not any(call["url"].endswith("/api/tax/v1/gitax/submit/5001/ta-submit") for call in calls)
 
 
 def test_submit_tax_reports_no_targets_returns_session_active():

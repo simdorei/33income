@@ -605,6 +605,25 @@ def test_dashboard_can_queue_report_one_click_submit_from_taxdoc_id_list_for_rep
     assert "only allowed for reporter" in sender_response.text
 
 
+def test_dashboard_can_queue_report_one_click_submit_without_taxdoc_ids(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   "},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "submit_tax_reports"
+    assert '"tax_doc_ids": []' in commands[0]["payload_json"]
+    assert '"one_click_submit": true' in commands[0]["payload_json"]
+
+
 def test_dashboard_rejects_invalid_taxdoc_id_list(tmp_path):
     client = build_client(tmp_path)
 

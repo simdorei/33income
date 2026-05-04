@@ -738,6 +738,8 @@ def _taxdoc_filter_search_url(
     workflow_filter_set: str = "ASSIGN_WAITING",
     tax_doc_custom_type_filter: str = "ALL",
     apply_expense_rate_type_filter: str = "ALL",
+    review_type_filter: str = "NORMAL",
+    sort_field: str = "REVIEW_REQUEST_DATE_TIME",
     direction: str = "DESC",
 ) -> str:
     params = {
@@ -747,7 +749,7 @@ def _taxdoc_filter_search_url(
         "taxDocCustomTypeFilter": tax_doc_custom_type_filter,
         "businessIncomeTypeFilter": "ALL",
         "freelancerIncomeAmountTypeFilter": "ALL",
-        "reviewTypeFilter": "NORMAL",
+        "reviewTypeFilter": review_type_filter,
         "submitGuideTypeFilter": "ALL",
         "applyExpenseRateTypeFilter": apply_expense_rate_type_filter,
         "noticeTypeFilter": "ALL",
@@ -757,7 +759,7 @@ def _taxdoc_filter_search_url(
         "refundStatusFilter": "ALL",
         "taxDocServiceCodeTypeFilter": "C0",
         "year": year,
-        "sort": "REVIEW_REQUEST_DATE_TIME",
+        "sort": sort_field,
         "direction": direction,
         "page": page,
         "size": size,
@@ -1221,6 +1223,8 @@ def preview_expected_tax_send_targets(
     apply_expense_rate_type_filter = str(
         payload.get("apply_expense_rate_type_filter") or payload.get("applyExpenseRateTypeFilter") or "ALL"
     )
+    review_type_filter = str(payload.get("review_type_filter") or payload.get("reviewTypeFilter") or "NORMAL")
+    sort_field = str(payload.get("sort") or payload.get("sort_field") or payload.get("sortField") or "REVIEW_REQUEST_DATE_TIME")
     direction = str(payload.get("direction") or "DESC").upper()
 
     if is_browser_control_dry_run(payload):
@@ -1279,6 +1283,8 @@ def preview_expected_tax_send_targets(
                 workflow_filter_set=workflow_filter_set,
                 tax_doc_custom_type_filter=tax_doc_custom_type_filter,
                 apply_expense_rate_type_filter=apply_expense_rate_type_filter,
+                review_type_filter=review_type_filter,
+                sort_field=sort_field,
                 direction=direction,
             )
             list_response = _browser_fetch_json(
@@ -1568,7 +1574,7 @@ def submit_tax_reports(
             "failure_summary_file": TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE,
         }
 
-    if not tax_doc_ids:
+    if not tax_doc_ids and not one_click_submit_enabled:
         return {
             "ok": True,
             "dry_run": False,
@@ -1891,13 +1897,283 @@ def submit_tax_reports(
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
             page.goto(submit_web_path, wait_until="domcontentloaded")
 
+        one_click_tax_doc_ids = list(tax_doc_ids)
+        if not one_click_tax_doc_ids:
+            year = _resolve_taxdoc_year(payload)
+            page_index = max(0, int(payload.get("page", 0)))
+            size = max(1, min(100, int(payload.get("one_click_target_size") or payload.get("size") or 20)))
+            workflow_filter_set = str(payload.get("workflow_filter_set") or payload.get("workflowFilterSet") or "SUBMIT_READY")
+            tax_doc_custom_type_filter = str(
+                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "NONE"
+            )
+            review_type_filter = str(payload.get("review_type_filter") or payload.get("reviewTypeFilter") or "NORMAL")
+            apply_expense_rate_type_filter = str(
+                payload.get("apply_expense_rate_type_filter") or payload.get("applyExpenseRateTypeFilter") or "ALL"
+            )
+            sort_field = str(payload.get("sort") or payload.get("sort_field") or payload.get("sortField") or "SUBMIT_REQUEST_DATE_TIME")
+            direction = str(payload.get("direction") or "ASC").upper()
+
+            office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+            office_response = _browser_fetch_json(
+                page,
+                url=office_url,
+                headers={
+                    "accept": "application/json, text/plain, */*",
+                    "x-host": "GROUND",
+                    "x-web-path": submit_web_path,
+                },
+            )
+            office_json = office_response.get("json") or {}
+            if not office_response.get("ok") or not office_json.get("ok"):
+                raise RuntimeError(f"office lookup failed status={office_response.get('status')}")
+            offices = office_json.get("data") or []
+            if not offices:
+                raise RuntimeError("office lookup returned no offices")
+            office_id, _office_index = _resolve_tax_office_selection(
+                offices=list(offices),
+                payload=payload,
+                bot_id=bot_id,
+            )
+            list_url = _taxdoc_filter_search_url(
+                api_base_url=api_base_url,
+                office_id=office_id,
+                year=year,
+                page=page_index,
+                size=size,
+                workflow_filter_set=workflow_filter_set,
+                tax_doc_custom_type_filter=tax_doc_custom_type_filter,
+                apply_expense_rate_type_filter=apply_expense_rate_type_filter,
+                review_type_filter=review_type_filter,
+                sort_field=sort_field,
+                direction=direction,
+            )
+            list_response = _browser_fetch_json(
+                page,
+                url=list_url,
+                headers={
+                    "accept": "application/json, text/plain, */*",
+                    "x-host": "GIT",
+                    "x-web-path": submit_web_path,
+                },
+            )
+            list_json = list_response.get("json") or {}
+            if not list_response.get("ok") or not list_json.get("ok"):
+                raise RuntimeError(f"taxdoc list failed page={page_index + 1} status={list_response.get('status')}")
+            rows = (list_json.get("data") or {}).get("content") or []
+            one_click_tax_doc_ids = _normalize_tax_doc_ids([row.get("taxDocId") for row in rows if row.get("taxDocId") is not None])
+
+        if not one_click_tax_doc_ids:
+            return {
+                "ok": True,
+                "dry_run": False,
+                "status": "session_active",
+                "current_step": f"{report_label} 대상 없음",
+                "debug_port": debug_port,
+                "run_id": run_id,
+                "mode": "one_click_submit",
+                "attempted_count": 0,
+                "success_count": 0,
+                "in_progress_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "tax_doc_ids": [],
+                "eligible_tax_doc_ids": [],
+                "results": [],
+                "failures": [],
+                "log_file": TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE,
+                "failure_summary_file": TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE,
+                "poll_interval_sec": poll_interval_sec,
+                "poll_timeout_sec": poll_timeout_sec,
+            }
+
+        me_headers = {
+            "accept": "application/json",
+            "x-host": "GROUND",
+            "x-web-path": "dashboard/default",
+        }
+        assign_headers = {
+            "accept": "application/json",
+            "x-host": "GIT",
+            "x-web-path": "tasks/git/default",
+        }
+        business_income_web_path = str(
+            payload.get("gross_income_web_path")
+            or os.getenv("INCOME33_GROSS_INCOME_WEB_PATH")
+            or "https://newta.3o3.co.kr/git/gross-income"
+        )
+        correction_web_path = str(
+            payload.get("minus_amount_web_path")
+            or os.getenv("INCOME33_MINUS_AMOUNT_WEB_PATH")
+            or "https://newta.3o3.co.kr/git/summary"
+        )
+        business_headers = {
+            "accept": "application/json, text/plain, */*",
+            "x-host": "GIT",
+            "x-web-path": business_income_web_path,
+        }
+        correction_headers = {
+            "accept": "application/json, text/plain, */*",
+            "x-host": "GIT",
+            "x-web-path": correction_web_path,
+        }
+
+        assign_result = _assign_taxdocs_to_current_accountant_in_page(
+            page=page,
+            api_base_url=api_base_url,
+            tax_doc_ids=one_click_tax_doc_ids,
+            me_headers=me_headers,
+            assign_headers=assign_headers,
+        )
+
         results: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
-        success_count = 0
+        eligible_tax_doc_ids: list[int] = []
         log_path: Path | None = None
         summary_log_path: Path | None = None
+        minus_amount_failure_custom_type = str(
+            payload.get("minus_amount_failure_custom_type")
+            or payload.get("minusAmountFailureCustomType")
+            or payload.get("failure_custom_type")
+            or payload.get("failureCustomType")
+            or "아"
+        ).strip() or None
 
-        for attempt_index, tax_doc_id in enumerate(tax_doc_ids, start=1):
+        for attempt_index, tax_doc_id in enumerate(one_click_tax_doc_ids, start=1):
+            normalized_tax_doc_id = int(tax_doc_id)
+            business_incomes_url = f"{api_base_url}/api/tax/v1/gitax/gross-incomes-prepaid-tax/{normalized_tax_doc_id}/business-incomes"
+            try:
+                business_response = _browser_fetch_json(
+                    page,
+                    url=business_incomes_url,
+                    method="GET",
+                    headers=business_headers,
+                )
+            except Exception as exc:
+                business_response = {
+                    "ok": False,
+                    "status": 0,
+                    "url": business_incomes_url,
+                    "json": None,
+                    "text": None,
+                    "fetch_error": str(exc),
+                }
+
+            business_json = business_response.get("json") or {}
+            if not business_response.get("ok") or not business_json.get("ok"):
+                failure, log_path, summary_log_path = _build_failure(
+                    tax_doc_id=normalized_tax_doc_id,
+                    stage="business_incomes",
+                    stage_label="사업소득조회",
+                    response=business_response,
+                    request_method="GET",
+                    request_url=business_incomes_url,
+                    request_body=None,
+                    attempt_index=attempt_index,
+                )
+                failures.append(failure)
+                results.append({**failure, "status": "skipped"})
+                continue
+
+            business_data = business_json.get("data") or {}
+            summary = business_data.get("summary") if isinstance(business_data, dict) else {}
+            item_list = summary.get("itemList") if isinstance(summary, dict) else []
+            if not isinstance(item_list, list):
+                item_list = []
+
+            business_numbers: list[str] = []
+            for item in item_list:
+                if not isinstance(item, dict):
+                    continue
+                raw_business_number = str(item.get("사업자번호") or "").strip()
+                if not raw_business_number or raw_business_number in business_numbers:
+                    continue
+                business_numbers.append(raw_business_number)
+
+            item_failed = False
+            for business_number in business_numbers:
+                business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
+                query = urlencode({"businessNumber": business_number, "businessIncomeType": business_income_type})
+                correction_url = f"{api_base_url}/api/tax/v1/gitax/bookkeeping/{normalized_tax_doc_id}/minus-amount/correction?{query}"
+                try:
+                    correction_response = _browser_fetch_json(
+                        page,
+                        url=correction_url,
+                        method="POST",
+                        headers=correction_headers,
+                    )
+                except Exception as exc:
+                    correction_response = {
+                        "ok": False,
+                        "status": 0,
+                        "url": correction_url,
+                        "json": None,
+                        "text": None,
+                        "fetch_error": str(exc),
+                    }
+
+                correction_json = correction_response.get("json") or {}
+                correction_reason = _report_failure_reason(correction_response, correction_json)
+                no_negative_items = bool(correction_response.get("status") == 400) and (
+                    "총 필요경비에 음수항목이 존재하지 않습니다." in correction_reason
+                )
+                correction_success = (
+                    (correction_response.get("ok") and correction_json.get("ok"))
+                    or no_negative_items
+                )
+                if correction_success:
+                    continue
+
+                custom_type_status_code: int | None = None
+                custom_type_error: str | None = None
+                if minus_amount_failure_custom_type:
+                    try:
+                        custom_response = _put_custom_type_for_taxdoc(
+                            page=page,
+                            api_base_url=api_base_url,
+                            tax_doc_id=normalized_tax_doc_id,
+                            headers=headers,
+                            custom_type=minus_amount_failure_custom_type,
+                        )
+                        custom_type_status_code = custom_response.get("status")
+                    except Exception as custom_exc:
+                        custom_type_error = str(custom_exc)
+                        logger.exception(
+                            "tax_report_minus_amount_custom_type_failed bot_id=%s tax_doc_id=%s custom_type=%s",
+                            bot_id,
+                            normalized_tax_doc_id,
+                            minus_amount_failure_custom_type,
+                        )
+
+                failure, log_path, summary_log_path = _build_failure(
+                    tax_doc_id=normalized_tax_doc_id,
+                    stage="minus_amount_correction",
+                    stage_label="음수항목 보정",
+                    response=correction_response,
+                    request_method="POST",
+                    request_url=correction_url,
+                    request_body=None,
+                    attempt_index=attempt_index,
+                    extra={
+                        "business_number": business_number,
+                        "business_income_type": business_income_type,
+                        "custom_type": minus_amount_failure_custom_type,
+                        "custom_type_status_code": custom_type_status_code,
+                        "custom_type_error": custom_type_error,
+                    },
+                )
+                failures.append(failure)
+                results.append({**failure, "status": "skipped"})
+                item_failed = True
+                break
+
+            if item_failed:
+                continue
+            eligible_tax_doc_ids.append(normalized_tax_doc_id)
+
+        success_count = 0
+        in_progress_count = 0
+
+        for attempt_index, tax_doc_id in enumerate(eligible_tax_doc_ids, start=1):
             normalized_tax_doc_id = int(tax_doc_id)
             submit_category: str | None = None
             category_url = f"{api_base_url}/api/tax/v1/gitax/submit/{normalized_tax_doc_id}/submit-category"
@@ -1975,147 +2251,47 @@ def submit_tax_reports(
                 continue
             submit_category = submit_category or _one_click_category_from_response(start_json)
 
-            poll_count = 0
-            final_status: str | None = None
-            final_error_message: str | None = None
-            deadline = time.monotonic() + poll_timeout_sec
-            item_failed = False
+            try:
+                status_response = _browser_fetch_json(
+                    page,
+                    url=status_url,
+                    method="GET",
+                    headers=headers,
+                )
+            except Exception as exc:
+                status_response = {
+                    "ok": False,
+                    "status": 0,
+                    "url": status_url,
+                    "json": None,
+                    "text": None,
+                    "fetch_error": str(exc),
+                }
 
-            while True:
-                try:
-                    status_response = _browser_fetch_json(
-                        page,
-                        url=status_url,
-                        method="GET",
-                        headers=headers,
-                    )
-                except Exception as exc:
-                    status_response = {
-                        "ok": False,
-                        "status": 0,
-                        "url": status_url,
-                        "json": None,
-                        "text": None,
-                        "fetch_error": str(exc),
-                    }
-                poll_count += 1
-                status_json = status_response.get("json") or {}
-                final_status = _one_click_status_from_response(status_json)
-                final_error_message = _one_click_error_message_from_response(status_json)
+            poll_count = 1
+            status_json = status_response.get("json") or {}
+            final_status = _one_click_status_from_response(status_json)
+            final_error_message = _one_click_error_message_from_response(status_json)
 
-                if not status_response.get("ok") or _response_json_ok(status_json) is False:
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="ta_submit_status",
-                        stage_label="신고제출상태확인",
-                        response=status_response,
-                        request_method="GET",
-                        request_url=status_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={
-                            "submit_category": submit_category,
-                            "final_status": final_status,
-                            "errorMessage": final_error_message,
-                            "poll_count": poll_count,
-                        },
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped"})
-                    item_failed = True
-                    break
-
-                if final_status in ONE_CLICK_SUCCESS_STATUSES:
-                    success_count += 1
-                    _delete_tax_report_submit_response_logs_for_taxdoc(tax_doc_id=normalized_tax_doc_id)
-                    _delete_tax_report_submit_failure_summaries_for_taxdoc(tax_doc_id=normalized_tax_doc_id)
-                    results.append(
-                        {
-                            "tax_doc_id": normalized_tax_doc_id,
-                            "status": "completed",
-                            "stage": "ta_submit_status",
-                            "submit_category": submit_category,
-                            "final_status": final_status,
-                            "errorMessage": final_error_message,
-                            "poll_count": poll_count,
-                        }
-                    )
-                    break
-
-                if final_status in ONE_CLICK_FAILURE_STATUSES:
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="ta_submit_status",
-                        stage_label="신고제출상태확인",
-                        response=status_response,
-                        request_method="GET",
-                        request_url=status_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={
-                            "submit_category": submit_category,
-                            "final_status": final_status,
-                            "errorMessage": final_error_message,
-                            "poll_count": poll_count,
-                            "failure_reason": final_error_message or f"terminal failure status={final_status}",
-                        },
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped"})
-                    item_failed = True
-                    break
-
-                if final_status not in ONE_CLICK_PROGRESS_STATUSES:
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="ta_submit_status",
-                        stage_label="신고제출상태확인",
-                        response=status_response,
-                        request_method="GET",
-                        request_url=status_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={
-                            "submit_category": submit_category,
-                            "final_status": final_status,
-                            "errorMessage": final_error_message,
-                            "poll_count": poll_count,
-                            "failure_reason": f"unknown final submit status={final_status or 'missing'}",
-                        },
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped"})
-                    item_failed = True
-                    break
-
-                now = time.monotonic()
-                if now >= deadline:
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="ta_submit_status_timeout",
-                        stage_label="신고제출상태확인",
-                        response=status_response,
-                        request_method="GET",
-                        request_url=status_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={
-                            "submit_category": submit_category,
-                            "final_status": final_status,
-                            "errorMessage": final_error_message,
-                            "poll_count": poll_count,
-                            "failure_reason": f"poll timeout after {poll_timeout_sec:g}s status={final_status}",
-                        },
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped"})
-                    item_failed = True
-                    break
-
-                if poll_interval_sec > 0:
-                    time.sleep(min(poll_interval_sec, max(0.0, deadline - now)))
-
-            if item_failed:
+            if not status_response.get("ok") or _response_json_ok(status_json) is False:
+                failure, log_path, summary_log_path = _build_failure(
+                    tax_doc_id=normalized_tax_doc_id,
+                    stage="ta_submit_status",
+                    stage_label="신고제출상태확인",
+                    response=status_response,
+                    request_method="GET",
+                    request_url=status_url,
+                    request_body=None,
+                    attempt_index=attempt_index,
+                    extra={
+                        "submit_category": submit_category,
+                        "final_status": final_status,
+                        "errorMessage": final_error_message,
+                        "poll_count": poll_count,
+                    },
+                )
+                failures.append(failure)
+                results.append({**failure, "status": "skipped"})
                 logger.warning(
                     "tax_report_one_click_submit_failed bot_id=%s tax_doc_id=%s final_status=%s poll_count=%s",
                     bot_id,
@@ -2123,6 +2299,69 @@ def submit_tax_reports(
                     final_status,
                     poll_count,
                 )
+                continue
+
+            if final_status in ONE_CLICK_SUCCESS_STATUSES:
+                success_count += 1
+                _delete_tax_report_submit_response_logs_for_taxdoc(tax_doc_id=normalized_tax_doc_id)
+                _delete_tax_report_submit_failure_summaries_for_taxdoc(tax_doc_id=normalized_tax_doc_id)
+                results.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "status": "completed",
+                        "stage": "ta_submit_status",
+                        "submit_category": submit_category,
+                        "final_status": final_status,
+                        "errorMessage": final_error_message,
+                        "poll_count": poll_count,
+                    }
+                )
+                continue
+
+            if final_status in ONE_CLICK_PROGRESS_STATUSES:
+                in_progress_count += 1
+                results.append(
+                    {
+                        "tax_doc_id": normalized_tax_doc_id,
+                        "status": "in_progress",
+                        "stage": "ta_submit_status",
+                        "submit_category": submit_category,
+                        "final_status": final_status,
+                        "errorMessage": final_error_message,
+                        "poll_count": poll_count,
+                    }
+                )
+                continue
+
+            failure_reason = final_error_message or (
+                f"terminal failure status={final_status}" if final_status in ONE_CLICK_FAILURE_STATUSES else f"unknown final submit status={final_status or 'missing'}"
+            )
+            failure, log_path, summary_log_path = _build_failure(
+                tax_doc_id=normalized_tax_doc_id,
+                stage="ta_submit_status",
+                stage_label="신고제출상태확인",
+                response=status_response,
+                request_method="GET",
+                request_url=status_url,
+                request_body=None,
+                attempt_index=attempt_index,
+                extra={
+                    "submit_category": submit_category,
+                    "final_status": final_status,
+                    "errorMessage": final_error_message,
+                    "poll_count": poll_count,
+                    "failure_reason": failure_reason,
+                },
+            )
+            failures.append(failure)
+            results.append({**failure, "status": "skipped"})
+            logger.warning(
+                "tax_report_one_click_submit_failed bot_id=%s tax_doc_id=%s final_status=%s poll_count=%s",
+                bot_id,
+                normalized_tax_doc_id,
+                final_status,
+                poll_count,
+            )
 
         failed_count = len(failures)
         skipped_count = failed_count
@@ -2134,21 +2373,28 @@ def submit_tax_reports(
             "ok": failed_count == 0,
             "dry_run": False,
             "status": "session_active" if failed_count == 0 else "manual_required",
-            "current_step": f"{report_label} 완료 성공={success_count}건 패스={skipped_count}건 실패={failed_count}건 공유로그={summary_log_label} 원본로그={log_label}",
+            "current_step": (
+                f"{report_label} 완료 성공={success_count}건 진행중={in_progress_count}건 "
+                f"패스={skipped_count}건 실패={failed_count}건 공유로그={summary_log_label} 원본로그={log_label}"
+            ),
             "debug_port": debug_port,
             "run_id": run_id,
             "mode": "one_click_submit",
-            "attempted_count": len(tax_doc_ids),
+            "attempted_count": len(one_click_tax_doc_ids),
             "success_count": success_count,
+            "in_progress_count": in_progress_count,
             "skipped_count": skipped_count,
             "failed_count": failed_count,
-            "tax_doc_ids": tax_doc_ids,
+            "tax_doc_ids": one_click_tax_doc_ids,
+            "eligible_tax_doc_ids": eligible_tax_doc_ids,
             "results": results,
             "failures": failures,
             "log_file": log_label,
             "failure_summary_file": summary_log_label,
             "poll_interval_sec": poll_interval_sec,
             "poll_timeout_sec": poll_timeout_sec,
+            "assigned_count": int(assign_result.get("assigned_count") or 0),
+            "tax_accountant_id": assign_result.get("tax_accountant_id"),
         }
 
     # 명시 템플릿을 넣은 수동/legacy 경로. 신고준비를 먼저 수행하지 않고,

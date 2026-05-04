@@ -94,9 +94,9 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
         f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-list' "
         "class='inline-form' style='display:inline'>"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
-        "placeholder='신고제출 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "placeholder='신고제출 taxDocId 목록(비우면 SUBMIT_READY/NONE/NORMAL 자동조회 20건)'></textarea>"
         "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. 붙여넣은 taxDocId 목록으로 NewTA 원클릭 신고제출을 시작할까요?')\">"
+        "onclick=\"return confirm('실제 최종 신고제출입니다. taxDocId 목록이 비어있으면 SUBMIT_READY/NONE/NORMAL 20건 자동조회 후 NewTA 원클릭 신고제출을 시작할까요?')\">"
         "원클릭 신고제출</button>"
         "</form>"
     )
