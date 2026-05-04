@@ -1,7 +1,15 @@
 import logging
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from income33.agent import browser_control
+
+
+@pytest.fixture(autouse=True)
+def isolate_one_click_log_dir(monkeypatch, tmp_path, request):
+    if "one_click" in request.node.name:
+        monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
 
 
 def test_mask_secret_never_exposes_value():
