@@ -2098,13 +2098,17 @@ def submit_tax_reports(
         )
         fetch_page_size = max(1, min(100, requested_fetch_page_size))
 
-        requested_max_auto_targets = int(
+        raw_max_auto_targets = (
             payload.get("max_auto_targets")
             or payload.get("maxAutoTargets")
             or os.getenv("INCOME33_ONE_CLICK_MAX_AUTO_TARGETS")
-            or 200
         )
-        max_auto_targets = max(1, min(2000, requested_max_auto_targets))
+        max_auto_targets: int | None
+        if raw_max_auto_targets in (None, ""):
+            max_auto_targets = None
+        else:
+            requested_max_auto_targets = int(raw_max_auto_targets)
+            max_auto_targets = requested_max_auto_targets if requested_max_auto_targets > 0 else None
 
         requested_submit_chunk_size = int(
             payload.get("one_click_submit_batch_size")
@@ -2169,7 +2173,9 @@ def submit_tax_reports(
             collected_tax_doc_ids: list[int] = []
             page_index = max(0, int(payload.get("page", 0)))
             total_pages: int | None = None
-            while len(collected_tax_doc_ids) < max_auto_targets:
+            while True:
+                if max_auto_targets is not None and len(collected_tax_doc_ids) >= max_auto_targets:
+                    break
                 list_url = _taxdoc_filter_search_url(
                     api_base_url=api_base_url,
                     office_id=office_id,
@@ -2213,7 +2219,7 @@ def submit_tax_reports(
                     if normalized_tax_doc_id <= 0 or normalized_tax_doc_id in collected_tax_doc_ids:
                         continue
                     collected_tax_doc_ids.append(normalized_tax_doc_id)
-                    if len(collected_tax_doc_ids) >= max_auto_targets:
+                    if max_auto_targets is not None and len(collected_tax_doc_ids) >= max_auto_targets:
                         break
 
                 raw_total_pages = data.get("totalPages")
@@ -2231,7 +2237,9 @@ def submit_tax_reports(
 
                 page_index += 1
 
-            one_click_tax_doc_ids = collected_tax_doc_ids[:max_auto_targets]
+            one_click_tax_doc_ids = (
+                collected_tax_doc_ids if max_auto_targets is None else collected_tax_doc_ids[:max_auto_targets]
+            )
 
         if not one_click_tax_doc_ids:
             return {

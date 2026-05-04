@@ -1937,6 +1937,74 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
     assert result["auto_fetch_pages"] == [0, 1]
 
 
+def test_submit_tax_reports_one_click_auto_fetch_targets_without_max_limit_fetches_all_pages(monkeypatch):
+    fetched_pages = []
+    expected_tax_doc_ids = list(range(7001, 7251))
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 327}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            query = parse_qs(urlparse(url).query)
+            page_index = int(query["page"][0])
+            fetched_pages.append(page_index)
+            assert query["size"] == ["100"]
+            assert query["workflowFilterSet"] == ["SUBMIT_READY"]
+            assert query["taxDocCustomTypeFilter"] == ["ALL"]
+            if page_index == 0:
+                rows = [{"taxDocId": tax_doc_id} for tax_doc_id in expected_tax_doc_ids[:100]]
+            elif page_index == 1:
+                rows = [{"taxDocId": tax_doc_id} for tax_doc_id in expected_tax_doc_ids[100:200]]
+            elif page_index == 2:
+                rows = [{"taxDocId": tax_doc_id} for tax_doc_id in expected_tax_doc_ids[200:]]
+            else:
+                raise AssertionError(f"unexpected page index: {page_index}")
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "content": rows,
+                        "totalElements": len(expected_tax_doc_ids),
+                        "totalPages": 3,
+                    },
+                },
+            }
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": expected_tax_doc_ids}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if "/api/tax/v1/gitax/gross-incomes-prepaid-tax/" in url and url.endswith("/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+        if "/api/tax/v1/gitax/submit/" in url and url.endswith("/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit/status"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"status": "IN_PROGRESS", "errorMessage": None}}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"one_click_submit": True, "one_click_fetch_page_size": 100},
+    )
+
+    assert result["ok"] is True
+    assert result["tax_doc_ids"] == expected_tax_doc_ids
+    assert result["attempted_count"] == len(expected_tax_doc_ids)
+    assert result["in_progress_count"] == len(expected_tax_doc_ids)
+    assert result["auto_fetch_pages"] == [0, 1, 2]
+    assert result["max_auto_targets"] is None
+
+
 def test_submit_tax_reports_one_click_submit_chunk_size_is_capped_to_20(monkeypatch):
     calls = []
     put_tax_doc_ids = []
