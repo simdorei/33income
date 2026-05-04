@@ -48,6 +48,29 @@ ELIGIBLE_EXPENSE_KEYS = (
     "기부금",
     "감가상각비",
 )
+REPORT_SKIP_AFTER_MINUS_AMOUNT_INDUSTRY_CODES = frozenset(
+    {
+        "701101",
+        "701102",
+        "701103",
+        "701104",
+        "701201",
+        "701202",
+        "701203",
+        "701204",
+        "701205",
+        "701206",
+        "701300",
+        "701301",
+        "701302",
+        "701400",
+        "701501",
+        "701502",
+        "701503",
+        "701504",
+    }
+)
+REPORT_SKIP_AFTER_MINUS_AMOUNT_CUSTOM_TYPE = "아"
 
 WINDOWS_BROWSER_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -1596,6 +1619,29 @@ def _calculation_type_from_value(value: Any) -> str | None:
     return None
 
 
+def _business_income_industry_codes(data: Any) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    raw_items = summary.get("itemList") if isinstance(summary.get("itemList"), list) else []
+    industry_codes: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        industry_code = str(item.get("업종코드") or "").strip()
+        if industry_code and industry_code not in industry_codes:
+            industry_codes.append(industry_code)
+    return industry_codes
+
+
+def _report_skip_after_minus_amount_industry_codes(data: Any) -> list[str]:
+    return [
+        industry_code
+        for industry_code in _business_income_industry_codes(data)
+        if industry_code in REPORT_SKIP_AFTER_MINUS_AMOUNT_INDUSTRY_CODES
+    ]
+
+
 def _is_refund_in_progress_start_response(response: dict[str, Any], response_json: Any) -> bool:
     try:
         status_code = int(response.get("status") or 0)
@@ -2200,6 +2246,7 @@ def submit_tax_reports(
                 "success_count": 0,
                 "in_progress_count": 0,
                 "skipped_count": 0,
+                "blocked_industry_skip_count": 0,
                 "failed_count": 0,
                 "tax_doc_ids": [],
                 "eligible_tax_doc_ids": [],
@@ -2223,6 +2270,55 @@ def submit_tax_reports(
         summary_log_path: Path | None = None
         success_count = 0
         in_progress_count = 0
+        blocked_industry_skip_count = 0
+
+        def _mark_blocked_industry_skip(
+            *,
+            normalized_tax_doc_id: int,
+            business_numbers: list[str],
+            blocked_industry_codes: list[str],
+            calculation_type: str | None,
+            correction_count: int,
+            correction_skipped_reason: str | None = None,
+        ) -> None:
+            nonlocal blocked_industry_skip_count
+            custom_type_status_code: int | None = None
+            custom_type_error: str | None = None
+            try:
+                custom_response = _put_custom_type_for_taxdoc(
+                    page=page,
+                    api_base_url=api_base_url,
+                    tax_doc_id=normalized_tax_doc_id,
+                    headers=headers,
+                    custom_type=REPORT_SKIP_AFTER_MINUS_AMOUNT_CUSTOM_TYPE,
+                )
+                custom_type_status_code = custom_response.get("status")
+            except Exception as custom_exc:
+                custom_type_error = str(custom_exc)
+                logger.exception(
+                    "tax_report_blocked_industry_custom_type_failed bot_id=%s tax_doc_id=%s industry_codes=%s custom_type=%s",
+                    bot_id,
+                    normalized_tax_doc_id,
+                    ",".join(blocked_industry_codes),
+                    REPORT_SKIP_AFTER_MINUS_AMOUNT_CUSTOM_TYPE,
+                )
+            blocked_industry_skip_count += 1
+            result = {
+                "tax_doc_id": normalized_tax_doc_id,
+                "status": "skipped",
+                "stage": "blocked_industry_code",
+                "stage_label": "업종코드 신고제출 제외",
+                "business_numbers": business_numbers,
+                "blocked_industry_codes": blocked_industry_codes,
+                "custom_type": REPORT_SKIP_AFTER_MINUS_AMOUNT_CUSTOM_TYPE,
+                "custom_type_status_code": custom_type_status_code,
+                "custom_type_error": custom_type_error,
+                "calculation_type": calculation_type,
+                "correction_count": correction_count,
+            }
+            if correction_skipped_reason:
+                result["correction_skipped_reason"] = correction_skipped_reason
+            results.append(result)
 
         def _check_status(
             *,
@@ -2505,6 +2601,7 @@ def submit_tax_reports(
             item_list = summary.get("itemList") if isinstance(summary, dict) else []
             if not isinstance(item_list, list):
                 item_list = []
+            blocked_industry_codes = _report_skip_after_minus_amount_industry_codes(business_data)
 
             business_numbers: list[str] = []
             for item in item_list:
@@ -2518,7 +2615,17 @@ def submit_tax_reports(
             item_failed = False
             calculation_type = _calculation_type_from_value(business_data)
             if calculation_type == "ESTIMATE":
-                eligible_tax_doc_ids.append(normalized_tax_doc_id)
+                if blocked_industry_codes:
+                    _mark_blocked_industry_skip(
+                        normalized_tax_doc_id=normalized_tax_doc_id,
+                        business_numbers=business_numbers,
+                        blocked_industry_codes=blocked_industry_codes,
+                        calculation_type=calculation_type,
+                        correction_count=0,
+                        correction_skipped_reason="calculation_type_estimate",
+                    )
+                else:
+                    eligible_tax_doc_ids.append(normalized_tax_doc_id)
                 continue
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
@@ -2597,6 +2704,15 @@ def submit_tax_reports(
                 break
 
             if item_failed:
+                continue
+            if blocked_industry_codes:
+                _mark_blocked_industry_skip(
+                    normalized_tax_doc_id=normalized_tax_doc_id,
+                    business_numbers=business_numbers,
+                    blocked_industry_codes=blocked_industry_codes,
+                    calculation_type=calculation_type,
+                    correction_count=len(business_numbers),
+                )
                 continue
             eligible_tax_doc_ids.append(normalized_tax_doc_id)
 
@@ -2735,7 +2851,7 @@ def submit_tax_reports(
                 )
 
         failed_count = len(failures)
-        skipped_count = failed_count
+        skipped_count = failed_count + blocked_industry_skip_count
         log_file_name = log_path.name if log_path else TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
         summary_log_file_name = summary_log_path.name if summary_log_path else TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE
         log_label = log_file_name if failed_count else "없음"
@@ -2755,6 +2871,7 @@ def submit_tax_reports(
             "success_count": success_count,
             "in_progress_count": in_progress_count,
             "skipped_count": skipped_count,
+            "blocked_industry_skip_count": blocked_industry_skip_count,
             "failed_count": failed_count,
             "tax_doc_ids": one_click_tax_doc_ids,
             "eligible_tax_doc_ids": eligible_tax_doc_ids,
