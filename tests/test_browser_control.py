@@ -1306,6 +1306,7 @@ def test_submit_tax_reports_assigns_then_applies_minus_amount_corrections(monkey
                 "json": {
                     "ok": True,
                     "data": {
+                        "calculationType": "BOOKKEEPING",
                         "summary": {
                             "itemList": [
                                 {"사업자번호": "000-00-00000"},
@@ -1334,6 +1335,7 @@ def test_submit_tax_reports_assigns_then_applies_minus_amount_corrections(monkey
                 "json": {
                     "ok": True,
                     "data": {
+                        "calculationType": "BOOKKEEPING",
                         "summary": {
                             "itemList": [
                                 {"사업자번호": "222-22-22222"},
@@ -1391,6 +1393,50 @@ def test_submit_tax_reports_assigns_then_applies_minus_amount_corrections(monkey
     assert "taxDocId=10" not in "\n".join(summary_lines)
     assert "taxDocId=99" in summary_lines[0]
     assert "taxDocId=11 | 음수항목 보정 실패 | status=500 | reason=temporary failure | customType=미설정" in summary_lines[1]
+
+
+def test_submit_tax_reports_skips_minus_amount_for_estimate_calculation_type(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [12]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/12/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "ESTIMATE",
+                        "summary": {"itemList": [{"사업자번호": "123-45-67890"}]},
+                    },
+                },
+            }
+        if "/minus-amount/correction" in url:
+            raise AssertionError("ESTIMATE calculationType must not call minus-amount correction")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(bot_id="reporter-01", payload={"tax_doc_ids": [12]})
+
+    assert result["ok"] is True
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["results"][0]["status"] == "completed"
+    assert result["results"][0]["calculation_type"] == "ESTIMATE"
+    assert result["results"][0]["correction_count"] == 0
+    assert result["results"][0]["correction_skipped_reason"] == "calculation_type_estimate"
+    assert not any("/minus-amount/correction" in call["url"] for call in calls)
 
 
 def test_submit_tax_reports_marks_business_income_lookup_failure_and_continues(monkeypatch):
@@ -1499,6 +1545,96 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
     assert result["results"][0]["poll_count"] == 1
     assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 1
     assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
+
+
+def test_submit_tax_reports_one_click_refund_in_progress_start_is_not_failure(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "ESTIMATE",
+                        "summary": {"itemList": [{"사업자번호": "123-45-67890"}]},
+                    },
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3002/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "ESTIMATE",
+                        "summary": {"itemList": [{"사업자번호": "222-22-22222"}]},
+                    },
+                },
+            }
+        if "/minus-amount/correction" in url:
+            raise AssertionError("ESTIMATE calculationType must not call minus-amount correction during one-click prepare")
+        if url.endswith("/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            assert method == "PUT"
+            return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "환불이 진행중입니다."}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3002/ta-submit"):
+            assert method == "PUT"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3002/ta-submit/status"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"submitUserType": "APP_USER", "status": "SUCCESS", "errorMessage": None},
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            raise AssertionError("refund-in-progress start response must not trigger an immediate status poll")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001, 3002], "one_click_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "session_active"
+    assert result["success_count"] == 1
+    assert result["in_progress_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["results"][0]["tax_doc_id"] == 3001
+    assert result["results"][0]["status"] == "in_progress"
+    assert result["results"][0]["stage"] == "ta_submit_start"
+    assert result["results"][0]["final_status"] == "REFUND_IN_PROGRESS"
+    assert result["results"][0]["errorMessage"] == "환불이 진행중입니다."
+    assert result["failures"] == []
+    assert not (tmp_path / "tax_report_submit_responses.jsonl").exists()
+    in_progress_lines = [
+        browser_control.json.loads(line)
+        for line in (tmp_path / "tax_report_one_click_in_progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert in_progress_lines[-1]["tax_doc_id"] == 3001
+    assert in_progress_lines[-1]["final_status"] == "REFUND_IN_PROGRESS"
+    assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 2
+    assert not any(call["url"].endswith("/submit/3001/ta-submit/status") for call in calls)
 
 
 def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(monkeypatch, tmp_path):

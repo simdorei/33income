@@ -1578,6 +1578,36 @@ def _one_click_error_message_from_response(response_json: Any) -> str | None:
     return None
 
 
+def _calculation_type_from_value(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("calculationType", "calculation_type"):
+            raw_calculation_type = value.get(key)
+            if raw_calculation_type:
+                return str(raw_calculation_type).strip().upper()
+        for child_value in value.values():
+            calculation_type = _calculation_type_from_value(child_value)
+            if calculation_type:
+                return calculation_type
+    elif isinstance(value, list):
+        for child_value in value:
+            calculation_type = _calculation_type_from_value(child_value)
+            if calculation_type:
+                return calculation_type
+    return None
+
+
+def _is_refund_in_progress_start_response(response: dict[str, Any], response_json: Any) -> bool:
+    try:
+        status_code = int(response.get("status") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if status_code != 400:
+        return False
+    reason = _report_failure_reason(response, response_json)
+    normalized_reason = re.sub(r"\s+", "", reason)
+    return "환불" in normalized_reason and "진행중" in normalized_reason
+
+
 def _one_click_category_from_response(response_json: Any) -> str | None:
     if not isinstance(response_json, dict):
         return None
@@ -1862,6 +1892,24 @@ def submit_tax_reports(
 
             correction_results: list[dict[str, Any]] = []
             item_failed = False
+            calculation_type = _calculation_type_from_value(business_data)
+            if calculation_type == "ESTIMATE":
+                success_count += 1
+                _delete_tax_report_submit_response_logs_for_taxdoc(tax_doc_id=int(tax_doc_id))
+                _delete_tax_report_submit_failure_summaries_for_taxdoc(tax_doc_id=int(tax_doc_id))
+                results.append(
+                    {
+                        "tax_doc_id": int(tax_doc_id),
+                        "status": "completed",
+                        "stage": "minus_amount_correction",
+                        "business_numbers": business_numbers,
+                        "calculation_type": calculation_type,
+                        "correction_count": 0,
+                        "correction_results": [],
+                        "correction_skipped_reason": "calculation_type_estimate",
+                    }
+                )
+                continue
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
                 query = urlencode({"businessNumber": business_number, "businessIncomeType": business_income_type})
@@ -2468,6 +2516,10 @@ def submit_tax_reports(
                 business_numbers.append(raw_business_number)
 
             item_failed = False
+            calculation_type = _calculation_type_from_value(business_data)
+            if calculation_type == "ESTIMATE":
+                eligible_tax_doc_ids.append(normalized_tax_doc_id)
+                continue
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
                 query = urlencode({"businessNumber": business_number, "businessIncomeType": business_income_type})
@@ -2629,6 +2681,34 @@ def submit_tax_reports(
 
                 start_json = start_response.get("json") or {}
                 start_json_ok = _response_json_ok(start_json)
+                if (not start_response.get("ok") or start_json_ok is False) and _is_refund_in_progress_start_response(
+                    start_response,
+                    start_json,
+                ):
+                    start_error_message = _one_click_error_message_from_response(start_json) or _report_failure_reason(
+                        start_response,
+                        start_json,
+                    )
+                    in_progress_count += 1
+                    _upsert_one_click_in_progress_record(
+                        tax_doc_id=normalized_tax_doc_id,
+                        run_id=run_id,
+                        final_status="REFUND_IN_PROGRESS",
+                        poll_interval_sec=poll_interval_sec,
+                    )
+                    results.append(
+                        {
+                            "tax_doc_id": normalized_tax_doc_id,
+                            "status": "in_progress",
+                            "stage": "ta_submit_start",
+                            "submit_category": submit_category,
+                            "final_status": "REFUND_IN_PROGRESS",
+                            "errorMessage": start_error_message,
+                            "poll_count": 0,
+                            "refund_in_progress": True,
+                        }
+                    )
+                    continue
                 if not start_response.get("ok") or start_json_ok is False:
                     failure, log_path, summary_log_path = _build_failure(
                         tax_doc_id=normalized_tax_doc_id,
