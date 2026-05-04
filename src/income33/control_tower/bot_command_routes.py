@@ -17,6 +17,38 @@ logger = logging.getLogger("income33.control_tower.app")
 
 DASHBOARD_ALLOWED_COMMANDS = frozenset(dashboard_allowed_commands())
 
+REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS = frozenset(
+    ("ALL", "NONE", "가", "나", "다", "라", "마", "바", "사", "아")
+)
+
+
+def _reporter_one_click_submit_payload(custom_type_filter: str) -> dict[str, Any]:
+    return {
+        "tax_doc_ids": [],
+        "one_click_submit": True,
+        "oneClickSubmit": True,
+        "tax_doc_custom_type_filter": custom_type_filter,
+        "taxDocCustomTypeFilter": custom_type_filter,
+        "workflow_filter_set": "SUBMIT_READY",
+        "workflowFilterSet": "SUBMIT_READY",
+        "review_type_filter": "NORMAL",
+        "reviewTypeFilter": "NORMAL",
+        "sort": "SUBMIT_REQUEST_DATE_TIME",
+        "sort_field": "SUBMIT_REQUEST_DATE_TIME",
+        "sortField": "SUBMIT_REQUEST_DATE_TIME",
+        "direction": "ASC",
+    }
+
+
+def _normalize_reporter_one_click_custom_type_filter(raw_value: str) -> str:
+    custom_type_filter = (raw_value or "").strip() or "ALL"
+    if custom_type_filter not in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid tax_doc_custom_type_filter: {custom_type_filter}",
+        )
+    return custom_type_filter
+
 
 def register_bot_command_routes(app: FastAPI) -> None:
     @app.post("/api/bots/{bot_id}/commands")
@@ -166,11 +198,14 @@ def register_bot_command_routes(app: FastAPI) -> None:
         )
 
     @app.post("/ui/commands/reporters/submit-tax-reports-one-click-all")
-    def queue_reporter_all_submit_tax_reports_one_click() -> RedirectResponse:
+    async def queue_reporter_all_submit_tax_reports_one_click(request: Request) -> RedirectResponse:
+        custom_type_filter = _normalize_reporter_one_click_custom_type_filter(
+            await read_form_value(request, "tax_doc_custom_type_filter")
+        )
         return _queue_command_for_all_bots(
             bot_type="reporter",
             command="submit_tax_reports",
-            payload={"tax_doc_ids": [], "one_click_submit": True},
+            payload=_reporter_one_click_submit_payload(custom_type_filter),
             log_label="queue_reporter_all_submit_tax_reports_one_click",
         )
 

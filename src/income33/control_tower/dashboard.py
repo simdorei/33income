@@ -15,6 +15,19 @@ BOT_DISPLAY_GROUPS: list[tuple[str, str, int, int, int]] = [
     ("신고 봇 01-09", "reporter", 1, 9, 9),
 ]
 
+REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS: tuple[str, ...] = (
+    "ALL",
+    "NONE",
+    "가",
+    "나",
+    "다",
+    "라",
+    "마",
+    "바",
+    "사",
+    "아",
+)
+
 
 def _build_html_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
     header = "".join(f"<th>{escape(col)}</th>" for col in columns)
@@ -66,7 +79,14 @@ def _submit_auth_code_form(bot_id: str) -> str:
     )
 
 
-def _all_bots_action_form(*, action: str, label: str, confirm_message: str, hint: str | None = None) -> str:
+def _all_bots_action_form(
+    *,
+    action: str,
+    label: str,
+    confirm_message: str,
+    hint: str | None = None,
+    extra_controls: str = "",
+) -> str:
     safe_action = escape(action, quote=True)
     safe_label = escape(label)
     safe_confirm = escape(confirm_message, quote=True)
@@ -75,11 +95,25 @@ def _all_bots_action_form(*, action: str, label: str, confirm_message: str, hint
         hint_html = f"<span class='hint'>{escape(hint)}</span>"
     return (
         f"<form method='post' action='{safe_action}' class='inline-form' style='display:inline'>"
+        f"{extra_controls}"
         "<button type='submit' class='send' "
         f"onclick=\"return confirm('{safe_confirm}')\">"
         f"{safe_label}</button>"
         f"{hint_html}"
         "</form>"
+    )
+
+
+def _reporter_one_click_custom_type_filter_select() -> str:
+    options_html = "".join(
+        f"<option value='{escape(option, quote=True)}'{' selected' if option == 'ALL' else ''}>{escape(option)}</option>"
+        for option in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS
+    )
+    return (
+        "<label class='inline-select'>자동조회 신고제출 유형 "
+        "<select name='tax_doc_custom_type_filter'>"
+        f"{options_html}"
+        "</select></label>"
     )
 
 
@@ -109,6 +143,7 @@ def _global_bulk_actions_html() -> str:
                 label="전체 자동조회 신고제출 실행",
                 confirm_message="reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉할까요?",
                 hint="SUBMIT_READY · 유형 ALL · 검토 NORMAL 전체조회 후 20건씩 신고제출",
+                extra_controls=_reporter_one_click_custom_type_filter_select(),
             ),
         ]
     )
