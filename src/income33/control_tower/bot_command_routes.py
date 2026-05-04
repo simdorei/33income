@@ -109,3 +109,13 @@ def register_bot_command_routes(app: FastAPI) -> None:
             log_label="queue_tax_report_submit_list",
             extra_payload={"prepare_only": True},
         )
+
+    @app.post("/ui/bots/{bot_id}/tax-report-one-click-submit-list")
+    async def queue_tax_report_one_click_submit_list(bot_id: str, request: Request) -> RedirectResponse:
+        return await _queue_tax_doc_id_list_command(
+            bot_id=bot_id,
+            request=request,
+            command="submit_tax_reports",
+            log_label="queue_tax_report_one_click_submit_list",
+            extra_payload={"one_click_submit": True},
+        )

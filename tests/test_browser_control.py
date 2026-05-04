@@ -1425,6 +1425,157 @@ def test_submit_tax_reports_marks_business_income_lookup_failure_and_continues(m
     assert result["failures"][0]["failure_reason"] == "fetch_error=network timeout"
 
 
+def test_submit_tax_reports_one_click_polls_until_success_without_second_start(monkeypatch):
+    calls = []
+    status_responses = ["IN_PROGRESS", "COMPLETED"]
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        assert headers == {
+            "accept": "application/json, text/plain, */*",
+            "x-host": "GIT",
+            "x-web-path": "https://newta.3o3.co.kr/git/submit",
+        }
+        if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
+            assert method == "GET"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            assert method == "PUT"
+            assert json_body == {"submitUserType": "APP_USER"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            assert method == "GET"
+            status = status_responses.pop(0)
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"submitUserType": "APP_USER", "status": status, "errorMessage": None},
+                },
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001], "one_click_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is True
+    assert result["mode"] == "one_click_submit"
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["current_step"].startswith("신고제출 완료 성공=1건 패스=0건 실패=0건")
+    assert result["results"][0]["submit_category"] == "TA_ONECLICK"
+    assert result["results"][0]["final_status"] == "COMPLETED"
+    assert result["results"][0]["poll_count"] == 2
+    assert sum(1 for call in calls if call["method"] == "PUT") == 1
+    assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 2
+
+
+def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            assert method == "PUT"
+            return {"ok": False, "status": 500, "json": {"ok": False, "error": {"message": "TEST_START_FAILED"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3002/ta-submit"):
+            assert method == "PUT"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3002/ta-submit/status"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"submitUserType": "APP_USER", "status": "SUCCESS", "errorMessage": None},
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            raise AssertionError("start failure must not poll status")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001, 3002], "final_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is False
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["failures"][0]["tax_doc_id"] == 3001
+    assert result["failures"][0]["stage"] == "ta_submit_start"
+    assert result["failures"][0]["submit_category"] == "TA_ONECLICK"
+    assert sum(1 for call in calls if call["method"] == "PUT") == 2
+    assert not any(call["url"].endswith("/submit/3001/ta-submit/status") for call in calls)
+    log_text = (tmp_path / "tax_report_submit_responses.jsonl").read_text(encoding="utf-8")
+    assert "TEST_START_FAILED" in log_text
+    assert "access-token" not in log_text
+
+
+def test_submit_tax_reports_one_click_status_timeout_logs_failure_without_second_start(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv("INCOME33_LOG_DIR", str(tmp_path))
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            assert method == "PUT"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"submitUserType": "APP_USER", "status": "IN_PROGRESS", "errorMessage": None},
+                },
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001], "submit_mode": "ta-submit", "poll_interval_sec": 0, "poll_timeout_sec": 0},
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "manual_required"
+    assert result["success_count"] == 0
+    assert result["failed_count"] == 1
+    assert result["failures"][0]["stage"] == "ta_submit_status_timeout"
+    assert result["failures"][0]["final_status"] == "IN_PROGRESS"
+    assert result["failures"][0]["poll_count"] == 1
+    assert sum(1 for call in calls if call["method"] == "PUT") == 1
+    assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
+    summary_text = (tmp_path / "tax_report_submit_failures.txt").read_text(encoding="utf-8")
+    assert "poll timeout after 0s status=IN_PROGRESS" in summary_text
+
+
 def test_submit_tax_reports_no_targets_returns_session_active():
     result = browser_control.submit_tax_reports(bot_id="reporter-01", payload={"tax_doc_ids": []})
 

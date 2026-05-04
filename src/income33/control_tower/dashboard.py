@@ -88,6 +88,20 @@ def _taxdoc_id_list_tax_report_submit_form(bot_id: str) -> str:
     )
 
 
+def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
+    safe_bot_id = escape(bot_id, quote=True)
+    return (
+        f"<form method='post' action='/ui/bots/{safe_bot_id}/tax-report-one-click-submit-list' "
+        "class='inline-form' style='display:inline'>"
+        "<textarea name='tax_doc_ids' rows='2' cols='24' "
+        "placeholder='신고제출 taxDocId 목록(쉼표/공백/줄바꿈)' required></textarea>"
+        "<button type='submit' class='send' "
+        "onclick=\"return confirm('실제 최종 신고제출입니다. 붙여넣은 taxDocId 목록으로 NewTA 원클릭 신고제출을 시작할까요?')\">"
+        "원클릭 신고제출</button>"
+        "</form>"
+    )
+
+
 def _bot_actions_html(bot_id: str) -> str:
     buttons = [
         _command_button(bot_id, "start", "시작"),
@@ -119,6 +133,7 @@ def _bot_actions_html(bot_id: str) -> str:
         buttons.append(_taxdoc_id_list_rate_based_bookkeeping_form(bot_id))
     if bot_id.startswith("reporter-"):
         buttons.append(_taxdoc_id_list_tax_report_submit_form(bot_id))
+        buttons.append(_taxdoc_id_list_tax_report_one_click_submit_form(bot_id))
     buttons.extend(
         [
             _command_button(bot_id, "login_done", "로그인 완료", "login-done"),

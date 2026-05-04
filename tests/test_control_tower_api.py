@@ -158,7 +158,7 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/send-expected-tax-amounts-list" not in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send-list" in root.text
     assert "/ui/bots/sender-01/rate-based-bookkeeping-send'" not in root.text
-    assert root.text.count("name='tax_doc_ids'") == 18
+    assert root.text.count("name='tax_doc_ids'") == 27
     assert "name='tax_doc_id'" not in root.text
     assert "<textarea" in root.text
     assert "/ui/bots/sender-01/commands/preview_rate_based_bookkeeping_expected_tax_amounts" not in root.text
@@ -166,8 +166,12 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "return confirm" in root.text
     assert "신고준비(음수항목 보정)" in root.text
     assert "신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
+    assert "원클릭 신고제출" in root.text
+    assert "실제 최종 신고제출입니다" in root.text
     assert "/ui/bots/reporter-01/tax-report-submit-list" in root.text
+    assert "/ui/bots/reporter-01/tax-report-one-click-submit-list" in root.text
     assert "/ui/bots/sender-01/tax-report-submit-list" not in root.text
+    assert "/ui/bots/sender-01/tax-report-one-click-submit-list" not in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
     assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
 
@@ -570,6 +574,35 @@ def test_dashboard_can_queue_report_submit_prepare_mode_from_taxdoc_id_list(tmp_
     assert commands[0]["command"] == "submit_tax_reports"
     assert '"tax_doc_ids": [2001, 2002]' in commands[0]["payload_json"]
     assert '"prepare_only": true' in commands[0]["payload_json"]
+
+
+def test_dashboard_can_queue_report_one_click_submit_from_taxdoc_id_list_for_reporter_only(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "2001 2002,2001"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "submit_tax_reports"
+    assert '"tax_doc_ids": [2001, 2002]' in commands[0]["payload_json"]
+    assert '"one_click_submit": true' in commands[0]["payload_json"]
+    assert '"prepare_only"' not in commands[0]["payload_json"]
+
+    sender_response = client.post(
+        "/ui/bots/sender-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "2001"},
+        follow_redirects=False,
+    )
+
+    assert sender_response.status_code == 400
+    assert "only allowed for reporter" in sender_response.text
 
 
 def test_dashboard_rejects_invalid_taxdoc_id_list(tmp_path):
