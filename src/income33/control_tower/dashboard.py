@@ -114,8 +114,10 @@ def _reporter_one_click_custom_type_filter_select() -> str:
         for option in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS
     )
     return (
-        "<label style='margin-right:6px'>자동조회 신고제출 유형 "
-        "<select name='tax_doc_custom_type_filter'>"
+        "<label style='margin-right:8px;display:inline-flex;align-items:center;gap:6px;font-weight:600'>"
+        "자동조회 신고제출 유형"
+        "<select name='tax_doc_custom_type_filter' "
+        "style='min-width:88px;padding:4px 8px;font-size:14px'>"
         f"{options_html}"
         "</select></label>"
     )
