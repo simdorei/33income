@@ -23,6 +23,7 @@ logs/
 profiles/
 tmp/
 dist/
+bookkeeping_zero_additional_expense_*.json
 
 # IDE / OS
 .vscode/
