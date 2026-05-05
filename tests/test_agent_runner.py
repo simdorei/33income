@@ -263,6 +263,32 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
     assert client.heartbeats[-1]["current_step"] == "계산발송 완료 9건 status=200"
 
 
+def test_runner_marks_send_401_as_login_required(monkeypatch):
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        raise RuntimeError("expected tax amount send failed status=401")
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    runner, client = build_runner(
+        [{"id": 144, "command": "send_expected_tax_amounts", "payload_json": json.dumps({"tax_doc_ids": [1]})}]
+    )
+
+    runner.run_once()
+
+    assert refresh_calls == []
+    assert client.completed == [
+        {
+            "command_id": 144,
+            "status": "failed",
+            "error_message": "expected tax amount send failed status=401",
+        }
+    ]
+    assert runner.bot.status == "login_required"
+    assert client.heartbeats[-1]["bot_status"] == "login_required"
+    assert "로그인" in client.heartbeats[-1]["current_step"]
+
+
 def test_runner_handles_send_simple_expense_rate_expected_tax_amounts_command(monkeypatch):
     calls = []
 
@@ -1230,6 +1256,28 @@ def test_runner_keepalive_refreshes_when_due(monkeypatch):
     assert calls == [{"bot_id": "sender-01", "payload": {}}]
     assert client.heartbeats[0]["bot_status"] == "session_active"
     assert client.heartbeats[0]["current_step"] == "session_refresh"
+
+
+def test_runner_throttles_session_active_login_probe(monkeypatch):
+    monotonic_points = iter([1000.0, 1001.0])
+    calls = []
+
+    def fake_monotonic():
+        return next(monotonic_points)
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_active"}
+
+    monkeypatch.setenv("INCOME33_REFRESH_INTERVAL_SECONDS", "300")
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    runner, _ = build_runner(monotonic_fn=fake_monotonic)
+    runner.bot.status = "session_active"
+
+    runner.run_once()
+    runner.run_once()
+
+    assert calls == [{"bot_id": "sender-01", "payload": {}}]
 
 
 def test_runner_keepalive_refreshes_during_repeat_even_when_auth_required(monkeypatch):

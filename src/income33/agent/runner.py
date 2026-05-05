@@ -69,6 +69,8 @@ _REPEAT_SEND_CONTINUABLE_STATUSES = {
     "manual_required",
 }
 
+_AUTH_EXPIRED_STATUS_CODES = frozenset({401, 403})
+
 
 def _build_bot_runner(agent: AgentConfig):
     if agent.bot_type == "reporter":
@@ -103,6 +105,7 @@ class AgentRunner:
         self.logger = logger or logging.getLogger("income33.agent.runner")
         self._monotonic = monotonic_fn or time.monotonic
         self._last_refresh_monotonic: float | None = None
+        self._last_login_probe_monotonic: float | None = None
         self._step_override: str | None = None
         self._persistent_step: str | None = None
         self._repeat_send_payload: dict[str, Any] | None = None
@@ -265,6 +268,14 @@ class AgentRunner:
     def _probe_browser_login_state(self) -> None:
         if self.bot.status not in _LOGIN_STATE_PROBE_STATUSES:
             return
+        if self._repeat_send_payload is not None and self.bot.status == "session_active":
+            return
+        if self.bot.status == "session_active":
+            interval = resolve_refresh_interval_seconds()
+            now = self._monotonic()
+            if not is_keepalive_due(self._last_login_probe_monotonic, now, interval):
+                return
+            self._last_login_probe_monotonic = now
         result = inspect_login_state(
             bot_id=self.agent.bot_id,
             payload={},
@@ -308,6 +319,7 @@ class AgentRunner:
             logger=logging.getLogger("income33.agent.browser_control"),
         )
         self._last_refresh_monotonic = now
+        self._last_login_probe_monotonic = now
         self._set_bot_state(
             str(result.get("status") or "session_active"),
             str(result.get("current_step") or "session_refresh"),
@@ -716,6 +728,10 @@ class AgentRunner:
             self._cancel_repeated_send()
         failure_prefix = self._failure_step_messages.get(command_name)
         if failure_prefix:
+            status_code = self._extract_status_code(str(exc))
+            if status_code in _AUTH_EXPIRED_STATUS_CODES:
+                self._set_bot_state("login_required", f"세션 만료 / 로그인 필요: {exc}")
+                return
             self._set_bot_state("manual_required", f"{failure_prefix}: {exc}")
 
     def _handle_command(self, command: dict[str, Any]) -> None:

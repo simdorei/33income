@@ -28,8 +28,9 @@ DEFAULT_LOGIN_URL = "https://newta.3o3.co.kr/login?r=%2F"
 DEFAULT_REFRESH_URL = "https://newta.3o3.co.kr/tasks/git"
 DEFAULT_API_BASE_URL = "https://ta-gw.3o3.co.kr"
 DEFAULT_DEBUG_PORT_BASE = 29200
-DEFAULT_REFRESH_INTERVAL_SECONDS = 600
+DEFAULT_REFRESH_INTERVAL_SECONDS = 300
 DEFAULT_TAXDOC_YEAR = 2025
+AUTH_EXPIRED_STATUS_CODES = frozenset({401, 403})
 ZERO_BUSINESS_NUMBER = "000-00-00000"
 CARD_USAGE_KEYS = (
     "신용카드등_신용카드",
@@ -207,6 +208,34 @@ def _env_text(name: str, fallback: str) -> str:
     if value is None or value.strip() == "":
         return fallback
     return value
+
+
+def _status_code_from_response(response: dict[str, Any]) -> int:
+    try:
+        return int(response.get("status") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_auth_expired_response(response: dict[str, Any]) -> bool:
+    return _status_code_from_response(response) in AUTH_EXPIRED_STATUS_CODES
+
+
+def _response_error_detail(response: dict[str, Any]) -> str:
+    status_code = _status_code_from_response(response)
+    details = [f"status={status_code}"]
+    fetch_error = response.get("fetch_error")
+    if fetch_error:
+        details.append(f"fetch_error={fetch_error}")
+    response_json = response.get("json")
+    if isinstance(response_json, dict):
+        error_value = response_json.get("error") or response_json.get("message")
+        if error_value:
+            details.append(f"error={error_value}")
+    text = response.get("text")
+    if text:
+        details.append(f"text={str(text)[:120]}")
+    return " ".join(details)
 
 
 def resolve_selector_text(
@@ -543,6 +572,76 @@ def submit_auth_code(
     return result
 
 
+def _probe_authenticated_tax_office_session(
+    *,
+    page: Any,
+    bot_id: str,
+    payload: dict[str, Any],
+    debug_port: int,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Verify real NewTA API auth with a lightweight office-list request."""
+    api_base_url = _resolve_tax_api_base_url(payload)
+    web_path = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/tasks/git")
+    office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+    response = _browser_fetch_json(
+        page,
+        url=office_url,
+        headers={
+            "accept": "application/json, text/plain, */*",
+            "x-web-path": web_path,
+            "x-host": "GROUND",
+        },
+    )
+    response_json = response.get("json") or {}
+    current_url = str(getattr(page, "url", "") or "")
+
+    if _is_auth_expired_response(response):
+        return {
+            "ok": False,
+            "status": "login_required",
+            "current_step": f"세션 만료 / 로그인 필요 {_response_error_detail(response)}",
+            "url": current_url,
+            "debug_port": debug_port,
+            "status_code": _status_code_from_response(response),
+        }
+
+    if response.get("ok") and isinstance(response_json, dict) and response_json.get("ok"):
+        offices = list(response_json.get("data") or [])
+        office_id: int | None = None
+        office_index: int | None = None
+        if offices:
+            office_id, office_index = _resolve_tax_office_selection(
+                offices=offices,
+                payload=payload,
+                bot_id=bot_id,
+            )
+        return {
+            "ok": True,
+            "status": "session_active",
+            "current_step": "session_active",
+            "url": current_url,
+            "debug_port": debug_port,
+            "status_code": _status_code_from_response(response),
+            "office_id": office_id,
+            "office_index": office_index,
+        }
+
+    logger.warning(
+        "tax_office_session_probe_failed bot_id=%s %s",
+        bot_id,
+        _response_error_detail(response),
+    )
+    return {
+        "ok": False,
+        "status": "manual_required",
+        "current_step": f"세션 확인 실패 {_response_error_detail(response)}",
+        "url": current_url,
+        "debug_port": debug_port,
+        "status_code": _status_code_from_response(response),
+    }
+
+
 def inspect_login_state(
     *,
     bot_id: str,
@@ -560,25 +659,28 @@ def inspect_login_state(
         env_name="INCOME33_LOGIN_AUTH_CODE_SELECTOR",
         fallback="input[name='authCode'] || input[name='otp'] || input[inputmode='numeric'] || input[type='tel']",
     )
-    dashboard_url = _env_text("INCOME33_DASHBOARD_URL", "https://newta.3o3.co.kr/dashboard")
 
     def _run(page: Any, debug_port: int) -> dict[str, Any] | None:
-        current_url = page.url
-        if current_url.rstrip("/").startswith(dashboard_url.rstrip("/")):
-            return {
-                "status": "session_active",
-                "current_step": "session_active",
-                "url": current_url,
-                "debug_port": debug_port,
-            }
+        api_result = _probe_authenticated_tax_office_session(
+            page=page,
+            bot_id=bot_id,
+            payload=payload,
+            debug_port=debug_port,
+            logger=logger,
+        )
+        if api_result.get("status") == "session_active":
+            return api_result
+
+        current_url = str(getattr(page, "url", "") or "")
         if _has_visible_locator(page, auth_selector, timeout_ms=500):
             return {
                 "status": "login_auth_required",
                 "current_step": "인증코드 입력 대기",
                 "url": current_url,
                 "debug_port": debug_port,
+                "status_code": api_result.get("status_code"),
             }
-        return None
+        return api_result
 
     try:
         result = _run_in_cdp_session(bot_id, payload, _run)
@@ -587,11 +689,13 @@ def inspect_login_state(
         return None
     if result:
         logger.info(
-            "inspect_login_state bot_id=%s status=%s step=%s url=%s",
+            "inspect_login_state bot_id=%s status=%s step=%s url=%s status_code=%s office_id=%s",
             bot_id,
             result.get("status"),
             result.get("current_step"),
             result.get("url"),
+            result.get("status_code"),
+            result.get("office_id"),
         )
     return result
 
@@ -3252,7 +3356,7 @@ def send_expected_tax_amounts(
                 send_json,
             )
         if not send_response.get("ok") or not send_json.get("ok") or result_data.get("result") is not True:
-            raise RuntimeError(f"expected tax amount send failed status={send_response.get('status')}")
+            raise RuntimeError(f"expected tax amount send failed {_response_error_detail(send_response)}")
         return {
             "ok": True,
             "dry_run": False,
@@ -4753,15 +4857,22 @@ def refresh_page(
         page.goto(refresh_url, wait_until="domcontentloaded")
         if force and hasattr(page, "reload"):
             page.reload(wait_until="domcontentloaded")
-        return {
-            "ok": True,
-            "dry_run": False,
-            "status": "session_active",
-            "current_step": "session_refresh",
-            "debug_port": debug_port,
-            "url": page.url,
-            "force": force,
-        }
+        probe_result = _probe_authenticated_tax_office_session(
+            page=page,
+            bot_id=bot_id,
+            payload=payload,
+            debug_port=debug_port,
+            logger=logger,
+        )
+        probe_result.update(
+            {
+                "dry_run": False,
+                "force": force,
+            }
+        )
+        if probe_result.get("status") == "session_active":
+            probe_result["current_step"] = "session_refresh"
+        return probe_result
 
     result = _run_in_cdp_session(bot_id, payload, _run)
     logger.info(

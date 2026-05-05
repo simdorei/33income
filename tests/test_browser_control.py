@@ -66,6 +66,86 @@ class FakePage:
         raise AssertionError("already on NewTA page")
 
 
+class RefreshFakePage:
+    def __init__(self, url="https://newta.3o3.co.kr/tasks/git"):
+        self.url = url
+        self.goto_calls = []
+        self.reload_calls = []
+
+    def goto(self, url, **kwargs):
+        self.goto_calls.append({"url": url, "kwargs": kwargs})
+        self.url = url
+
+    def reload(self, **kwargs):
+        self.reload_calls.append({"kwargs": kwargs})
+
+
+def test_inspect_login_state_uses_tax_office_api_even_when_not_dashboard(monkeypatch):
+    fetch_calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(RefreshFakePage(url="https://newta.3o3.co.kr/tasks/git"), 29203)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        fetch_calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        assert url.endswith("/api/ta/info/v1/tax-offices/simple")
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {"ok": True, "data": [{"id": 325}, {"id": 326}, {"id": 327}]},
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+    monkeypatch.setattr(browser_control, "_has_visible_locator", lambda *args, **kwargs: False)
+
+    result = browser_control.inspect_login_state(bot_id="sender-03")
+
+    assert result["status"] == "session_active"
+    assert result["current_step"] == "session_active"
+    assert result["office_id"] == 327
+    assert result["office_index"] == 2
+    assert fetch_calls[0]["headers"]["x-host"] == "GROUND"
+
+
+def test_inspect_login_state_treats_tax_office_401_as_login_required(monkeypatch):
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(RefreshFakePage(url="https://newta.3o3.co.kr/tasks/git"), 29203)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        return {"ok": False, "status": 401, "json": {"ok": False, "error": "Unauthorized"}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+    monkeypatch.setattr(browser_control, "_has_visible_locator", lambda *args, **kwargs: False)
+
+    result = browser_control.inspect_login_state(bot_id="sender-01")
+
+    assert result["status"] == "login_required"
+    assert "401" in result["current_step"]
+
+
+def test_refresh_page_verifies_session_with_tax_office_api(monkeypatch):
+    page = RefreshFakePage(url="https://newta.3o3.co.kr/login")
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(page, 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        assert url.endswith("/api/ta/info/v1/tax-offices/simple")
+        return {"ok": False, "status": 401, "json": {"ok": False, "error": "Unauthorized"}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.refresh_page(bot_id="sender-01", payload={"force": True})
+
+    assert result["status"] == "login_required"
+    assert "401" in result["current_step"]
+    assert page.goto_calls
+    assert page.reload_calls
+
+
 def test_preview_send_targets_scans_all_pages_reverse_by_default(monkeypatch):
     fetched_pages = []
 
@@ -1310,7 +1390,12 @@ def test_refresh_page_force_reload_calls_browser_reload(monkeypatch):
     def fake_run_in_cdp_session(bot_id, payload, callback):
         return callback(RefreshPage(), 29201)
 
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        assert url.endswith("/api/ta/info/v1/tax-offices/simple")
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 325}]}}
+
     monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
 
     result = browser_control.refresh_page(bot_id="sender-01", payload={"force": True})
 
