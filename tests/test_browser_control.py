@@ -943,6 +943,121 @@ def test_send_bookkeeping_expected_tax_amount_calculates_extra_expense_then_post
     assert result["current_step"] == "단건 계산발송 완료 taxDocId=1345836 추가경비=27543987 예상세액=-621639 지방세=-62164 수수료=185000 status=200"
 
 
+def test_send_bookkeeping_expected_tax_amount_retries_final_calculation_when_additional_expense_missing(monkeypatch):
+    calls = []
+    final_calculation_attempts = 0
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        nonlocal final_calculation_attempts
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body["추가_경비_인정액"] == 27_543_987
+            assert json_body["expectedTaxAmount"] == -621_639
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 13_994_157}, "error": None},
+            }
+        assert additional_expense_amount == 27_543_987
+        final_calculation_attempts += 1
+        applied_amount = 0 if final_calculation_attempts == 1 else 27_543_987
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "사업소득_필요_경비": 13_994_157,
+                    "사업소득_추가_경비_인정액": applied_amount,
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                },
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.send_bookkeeping_expected_tax_amount(
+        bot_id="sender-01",
+        payload={
+            "tax_doc_id": 1345836,
+            "submit_account_type": "CUSTOMER",
+            "total_business_expense_amount": 41_538_144,
+        },
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "POST"]
+    assert final_calculation_attempts == 2
+    assert result["additional_expense_amount"] == 27_543_987
+    assert result["expected_tax_amount"] == -621_639
+
+
+def test_send_bookkeeping_expected_tax_amount_aborts_when_final_calculation_retry_still_mismatches(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            raise AssertionError("send must not be posted while final calculation still mismatches additional expense")
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 13_994_157}, "error": None},
+            }
+        assert additional_expense_amount == 27_543_987
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "사업소득_필요_경비": 13_994_157,
+                    "사업소득_추가_경비_인정액": 0,
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                },
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    with pytest.raises(RuntimeError, match="additional expense mismatch expected=27543987 actual=0"):
+        browser_control.send_bookkeeping_expected_tax_amount(
+            bot_id="sender-01",
+            payload={
+                "tax_doc_id": 1345836,
+                "submit_account_type": "CUSTOMER",
+                "total_business_expense_amount": 41_538_144,
+            },
+        )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET"]
+
+
 def test_send_bookkeeping_expected_tax_amount_rejects_total_expense_below_base(monkeypatch):
     def fake_run_in_cdp_session(bot_id, payload, callback):
         return callback(FakePage(), 29201)
@@ -972,14 +1087,16 @@ def test_send_bookkeeping_expected_tax_amount_rejects_total_expense_below_base(m
         raise AssertionError("expense below base should fail")
 
 
-def test_rate_for_industry_code_rounds_generated_float_artifacts(monkeypatch):
+def test_rate_for_industry_code_normalizes_float_artifacts_before_flooring_percent_tenths(monkeypatch):
     monkeypatch.setitem(browser_control.SIMPLE_EXPENSE_RATES, "TEST918", 0.9179999999999999)
+    monkeypatch.setitem(browser_control.SIMPLE_EXPENSE_RATES, "TEST2459", 0.2459)
 
     assert browser_control._rate_for_industry_code("TEST918") == browser_control.Decimal("0.918")
     assert browser_control._floor_money(1000 * browser_control._rate_for_industry_code("TEST918")) == 918
+    assert browser_control._rate_for_industry_code("TEST2459") == browser_control.Decimal("0.245")
 
 
-def test_operator_requested_real_estate_industry_codes_use_2452_percent_rate():
+def test_operator_requested_real_estate_industry_codes_floor_to_245_percent_rate():
     requested_codes = (
         "701101",
         "701102",
@@ -1004,7 +1121,7 @@ def test_operator_requested_real_estate_industry_codes_use_2452_percent_rate():
     assert {
         code: browser_control._rate_for_industry_code(code)
         for code in requested_codes
-    } == {code: browser_control.Decimal("0.2452") for code in requested_codes}
+    } == {code: browser_control.Decimal("0.245") for code in requested_codes}
 
 
 def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and_logs_skip(
@@ -2330,6 +2447,68 @@ def test_submit_tax_reports_one_click_estimate_real_estate_code_still_submits_wi
     assert any(call["url"].endswith("/api/tax/v1/gitax/submit/5201/ta-submit") for call in calls)
     assert not any("/minus-amount/correction" in call["url"] for call in calls)
     assert not any(call["url"].endswith("/api/tax/v1/taxdocs/5201/custom-type") for call in calls)
+
+
+def test_submit_tax_reports_one_click_blocks_submit_when_submit_category_marks_tax_amount_mismatch(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert method == "PUT"
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [5301]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/5301/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "ESTIMATE",
+                        "summary": {"itemList": [{"사업자번호": "123-45-67890", "업종코드": "701101"}]},
+                    },
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/submit/5301/submit-category"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "category": "TA_ONECLICK",
+                        "canSubmit": False,
+                        "reason": "세액 차이로 제출할 수 없습니다.",
+                    },
+                },
+            }
+        if url.endswith("/api/tax/v1/gitax/submit/5301/ta-submit"):
+            raise AssertionError("submit-category blocked case must not call ta-submit")
+        if url.endswith("/api/tax/v1/gitax/submit/5301/ta-submit/status"):
+            raise AssertionError("submit-category blocked case must not call ta-submit/status")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [5301], "one_click_submit": True},
+    )
+
+    assert result["failed_count"] == 1
+    assert result["success_count"] == 0
+    assert result["in_progress_count"] == 0
+    assert result["failures"][0]["tax_doc_id"] == 5301
+    assert result["failures"][0]["stage"] == "submit_category_guard"
+    assert "세액 차이" in result["failures"][0]["failure_reason"]
+    assert not any(call["url"].endswith("/api/tax/v1/gitax/submit/5301/ta-submit") for call in calls)
 
 
 def test_submit_tax_reports_one_click_real_estate_code_sets_custom_type_ah_after_minus_amount_and_skips_submit(monkeypatch):

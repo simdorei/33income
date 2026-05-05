@@ -1777,6 +1777,47 @@ def _one_click_category_from_response(response_json: Any) -> str | None:
     category = data.get("category")
     return str(category).strip() if category else None
 
+
+def _one_click_submit_block_reason_from_response(response_json: Any) -> str | None:
+    if not isinstance(response_json, dict):
+        return None
+    data = response_json.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    bool_block_keys = {
+        "canSubmit",
+        "submitAble",
+        "submittable",
+        "isSubmittable",
+        "submitAvailable",
+        "allowSubmit",
+        "canStartSubmit",
+    }
+    message_keys = ("message", "errorMessage", "reason", "description", "detail")
+
+    for key in bool_block_keys:
+        if key in data and data.get(key) is False:
+            for message_key in message_keys:
+                value = data.get(message_key)
+                if value:
+                    return _redact_sensitive_summary_text(str(value))
+            return f"submit blocked by category flag: {key}=false"
+
+    for message_key in message_keys:
+        raw_message = data.get(message_key)
+        if not raw_message:
+            continue
+        normalized_message = str(raw_message)
+        compact_message = re.sub(r"\s+", "", normalized_message).lower()
+        if (
+            "세액" in compact_message and "차이" in compact_message
+        ) or "불일치" in compact_message or "mismatch" in compact_message or "difference" in compact_message:
+            return _redact_sensitive_summary_text(normalized_message)
+
+    return None
+
+
 def submit_tax_reports(
     *,
     bot_id: str,
@@ -2905,6 +2946,7 @@ def submit_tax_reports(
                     results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
                     continue
                 submit_category = _one_click_category_from_response(category_json)
+                category_block_reason = _one_click_submit_block_reason_from_response(category_json)
                 logger.info(
                     "tax_report_one_click_submit_category bot_id=%s run_id=%s tax_doc_id=%s tax_doc_custom_type_filter=%s submit_category=%s",
                     bot_id,
@@ -2913,6 +2955,32 @@ def submit_tax_reports(
                     tax_doc_custom_type_filter_for_log,
                     submit_category,
                 )
+                if category_block_reason:
+                    category_guard_response = {
+                        **category_response,
+                        "json": {
+                            **(category_json if isinstance(category_json, dict) else {}),
+                            "error": category_block_reason,
+                        },
+                    }
+                    failure, log_path, summary_log_path = _build_failure(
+                        tax_doc_id=normalized_tax_doc_id,
+                        stage="submit_category_guard",
+                        stage_label="신고제출차단",
+                        response=category_guard_response,
+                        request_method="GET",
+                        request_url=category_url,
+                        request_body=None,
+                        attempt_index=attempt_index,
+                        extra={
+                            "submit_category": submit_category,
+                            "poll_count": 0,
+                            "failure_reason": category_block_reason,
+                        },
+                    )
+                    failures.append(failure)
+                    results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
+                    continue
 
                 try:
                     start_response = _browser_fetch_json(
@@ -3862,7 +3930,12 @@ def _rate_for_industry_code(industry_code: Any) -> Decimal:
     code = str(industry_code or "").strip()
     if code not in SIMPLE_EXPENSE_RATES:
         raise RuntimeError(f"missing simple expense rate for industry_code={code}")
-    return Decimal(str(SIMPLE_EXPENSE_RATES[code])).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    # The generated table contains Python float artifacts such as
+    # 0.9179999999999999 for an operator-facing 91.8% rate.  First normalize
+    # those artifacts, then apply the business rule: use the rate floored to
+    # one decimal place in percentage terms (0.001 as a fraction).
+    normalized_rate = Decimal(str(SIMPLE_EXPENSE_RATES[code])).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    return normalized_rate.quantize(Decimal("0.001"), rounding=ROUND_FLOOR)
 
 
 def _income_items_from_business_incomes(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4331,11 +4404,37 @@ def send_bookkeeping_expected_tax_amount(
             submit_account_type=submit_account_type,
             additional_expense_amount=additional_expense_amount,
         )
-        final_response = _browser_fetch_json(page, url=final_calculation_url, headers=calculation_headers)
-        final_json = final_response.get("json") or {}
-        if not final_response.get("ok") or not final_json.get("ok"):
-            raise RuntimeError(f"bookkeeping final calculation failed status={final_response.get('status')}")
-        final_data = final_json.get("data") or {}
+        final_calculation_attempt_count = 2
+        final_data: dict[str, Any] = {}
+        applied_additional_expense_amount: int | None = None
+        for final_calculation_attempt in range(1, final_calculation_attempt_count + 1):
+            final_response = _browser_fetch_json(page, url=final_calculation_url, headers=calculation_headers)
+            final_json = final_response.get("json") or {}
+            if not final_response.get("ok") or not final_json.get("ok"):
+                raise RuntimeError(f"bookkeeping final calculation failed status={final_response.get('status')}")
+            final_data = final_json.get("data") or {}
+            applied_additional_expense_amount = _required_int_field(
+                final_data,
+                "사업소득_추가_경비_인정액",
+                label="사업소득_추가_경비_인정액",
+            )
+            if applied_additional_expense_amount == additional_expense_amount:
+                break
+            if final_calculation_attempt < final_calculation_attempt_count:
+                logger.warning(
+                    "bookkeeping final calculation additional expense mismatch retrying "
+                    "tax_doc_id=%s expected=%s actual=%s attempt=%s/%s",
+                    tax_doc_id,
+                    additional_expense_amount,
+                    applied_additional_expense_amount,
+                    final_calculation_attempt,
+                    final_calculation_attempt_count,
+                )
+                continue
+            raise RuntimeError(
+                "bookkeeping final calculation additional expense mismatch "
+                f"expected={additional_expense_amount} actual={applied_additional_expense_amount}"
+            )
         expected_tax_amount = _required_int_field(
             final_data,
             "종합소득세_납부_할_세액",
