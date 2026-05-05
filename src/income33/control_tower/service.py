@@ -112,30 +112,6 @@ if unknown_policy_commands := set(_COMMAND_POLICIES) - set(COMMAND_TYPES):
     )
 
 
-_CONTROL_PLANE_COMMANDS = frozenset(
-    {
-        "start",
-        "stop",
-        "restart",
-        "status",
-        "open_login",
-        "login_done",
-        "fill_login",
-        "refresh_page",
-        "submit_auth_code",
-    }
-)
-
-if missing_control_plane_commands := _CONTROL_PLANE_COMMANDS - set(COMMAND_TYPES):
-    raise RuntimeError(
-        f"unknown control-plane command definitions: {sorted(missing_control_plane_commands)}"
-    )
-
-
-def is_workload_command(command: str) -> bool:
-    return command not in _CONTROL_PLANE_COMMANDS
-
-
 def command_policies() -> dict[str, CommandPolicy]:
     return dict(_COMMAND_POLICIES)
 
@@ -297,11 +273,7 @@ class ControlTowerService:
             bot_id = str(bot.get("bot_id") or "")
             if not bot_id:
                 continue
-            cleared_count = self.db.clear_active_commands(
-                bot_id=bot_id,
-                reason="cleared_by_operator",
-                exclude_commands={"stop"},
-            )
+            cleared_count = self.db.clear_active_commands(bot_id=bot_id, reason="cleared_by_operator")
             queued_stop = self.queue_bot_command(bot_id=bot_id, command="stop", payload={})
             results.append(
                 {
@@ -317,10 +289,6 @@ class ControlTowerService:
 
     def list_repeat_schedules(self) -> list[dict[str, Any]]:
         return self.db.list_repeat_schedules()
-
-    def _reject_if_stop_active_for_workload(self, *, bot_id: str, command: str) -> None:
-        if is_workload_command(command) and self.db.has_active_command(bot_id=bot_id, command="stop"):
-            raise ValueError("stop command pending for bot; refusing to queue workload command")
 
     def _decode_schedule_payload(self, schedule: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -360,11 +328,6 @@ class ControlTowerService:
 
         results: list[dict[str, Any]] = []
         for bot in bots:
-            self._reject_if_stop_active_for_workload(
-                bot_id=str(bot["bot_id"]),
-                command=REPORTER_ONE_CLICK_COMMAND,
-            )
-        for bot in bots:
             target_bot_id = str(bot["bot_id"])
             payload = reporter_one_click_submit_payload(custom_type_filter=custom_type_filter)
             schedule = self.db.upsert_repeat_schedule(
@@ -387,18 +350,11 @@ class ControlTowerService:
                     REPORTER_ONE_CLICK_COMMAND,
                 )
             else:
-                try:
-                    queued = self.queue_bot_command(
-                        bot_id=target_bot_id,
-                        command=REPORTER_ONE_CLICK_COMMAND,
-                        payload=payload,
-                    )
-                except ValueError:
-                    self.db.disable_repeat_schedule(
-                        bot_id=target_bot_id,
-                        command=REPORTER_ONE_CLICK_COMMAND,
-                    )
-                    raise
+                queued = self.queue_bot_command(
+                    bot_id=target_bot_id,
+                    command=REPORTER_ONE_CLICK_COMMAND,
+                    payload=payload,
+                )
                 schedule = self.db.mark_repeat_schedule_queued(
                     schedule_id=int(schedule["id"]),
                     command_id=int(queued["id"]),
@@ -524,45 +480,12 @@ class ControlTowerService:
             for repeat_command in repeat_schedule_commands:
                 self.db.disable_repeat_schedule(bot_id=bot_id, command=repeat_command)
 
-        if command == "stop":
-            queued, cleared_count, deduped = self.db.enqueue_stop_command(
-                pc_id=bot["pc_id"],
-                bot_id=bot_id,
-                payload=payload,
-            )
-            if deduped:
-                logger.info(
-                    "stop_command_deduplicated bot_id=%s pc_id=%s existing_command_id=%s cleared_count=%s",
-                    bot_id,
-                    bot["pc_id"],
-                    queued["id"],
-                    cleared_count,
-                )
-            else:
-                logger.info(
-                    "command_enqueued bot_id=%s pc_id=%s command=%s command_id=%s cleared_count=%s",
-                    bot_id,
-                    bot["pc_id"],
-                    command,
-                    queued["id"],
-                    cleared_count,
-                )
-            return _sanitize_command_for_response(queued)
-
-        if is_workload_command(command):
-            queued = self.db.enqueue_command_unless_active_stop(
-                pc_id=bot["pc_id"],
-                bot_id=bot_id,
-                command=command,
-                payload=payload,
-            )
-        else:
-            queued = self.db.enqueue_command(
-                pc_id=bot["pc_id"],
-                bot_id=bot_id,
-                command=command,
-                payload=payload,
-            )
+        queued = self.db.enqueue_command(
+            pc_id=bot["pc_id"],
+            bot_id=bot_id,
+            command=command,
+            payload=payload,
+        )
         logger.info(
             "command_enqueued bot_id=%s pc_id=%s command=%s command_id=%s",
             bot_id,
