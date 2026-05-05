@@ -3458,7 +3458,6 @@ def send_expected_tax_amounts(
     if trace_enabled:
         preview_ids = [int(tax_doc_id) for tax_doc_id in list(verify_preview.get("tax_doc_ids") or [])]
         preview_id_set = set(preview_ids)
-        requested_set = set(requested_tax_doc_ids)
         requested_found_ids = [tax_doc_id for tax_doc_id in requested_tax_doc_ids if tax_doc_id in preview_id_set]
         requested_missing_ids = [tax_doc_id for tax_doc_id in requested_tax_doc_ids if tax_doc_id not in preview_id_set]
         logger.info(
@@ -3587,7 +3586,10 @@ def send_simple_expense_rate_expected_tax_amounts(
     submit_account_type = str(
         payload.get("submit_account_type") or payload.get("submitAccountType") or "CUSTOMER"
     ).strip().upper()
-    calculation_type = str(payload.get("calculation_type") or payload.get("calculationType") or "ESTIMATE").strip().upper()
+    # This workflow is only for simplified expense-rate estimate sends.  Do not
+    # allow an API/manual payload to turn the intentional ESTIMATE+0 body into a
+    # BOOKKEEPING+0 send.
+    calculation_type = "ESTIMATE"
     raw_calculation_retry_count = payload.get("calculation_retry_count")
     if raw_calculation_retry_count is None:
         raw_calculation_retry_count = payload.get("calculationRetryCount")
@@ -4468,11 +4470,9 @@ def send_bookkeeping_expected_tax_amount(
             label="사업소득_필요_경비",
         )
         additional_expense_amount = total_business_expense_amount - base_business_expense_amount
-        if additional_expense_amount < 0:
+        if additional_expense_amount <= 0:
             if not mark_da_on_negative_additional_expense:
-                raise ValueError(
-                    "total_business_expense_amount must be greater than or equal to base business expense"
-                )
+                raise ValueError("total_business_expense_amount must be greater than base business expense")
             custom_response = _put_custom_type_da_for_taxdoc(
                 page=page,
                 api_base_url=api_base_url,
@@ -4492,7 +4492,11 @@ def send_bookkeeping_expected_tax_amount(
                 "ok": True,
                 "dry_run": False,
                 "skipped": True,
-                "reason": "rate_total_below_newta_base_expense",
+                "reason": (
+                    "rate_total_below_newta_base_expense"
+                    if additional_expense_amount < 0
+                    else "rate_total_not_above_newta_base_expense"
+                ),
                 "status": "session_active",
                 "current_step": current_step,
                 "debug_port": debug_port,
