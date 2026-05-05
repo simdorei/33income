@@ -477,8 +477,9 @@ class AgentRunner:
         self._set_bot_state(self.bot.status)
 
     def _handle_stop(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
+        self._cancel_repeated_send()
         self.bot.stop()
-        self._set_bot_state(self.bot.status)
+        self._set_bot_state(self.bot.status, "반복 중지")
 
     def _handle_restart(self, payload: dict[str, Any], retry_policy: dict[str, Any]) -> None:
         self.bot.restart()

@@ -919,6 +919,36 @@ def test_stop_command_disables_reporter_submit_repeat_schedule(tmp_path):
     assert len(submit_commands) == 1
 
 
+def test_stop_command_disables_sender_send_repeat_schedule(tmp_path):
+    client = build_client(tmp_path)
+    service = client.app.state.service
+
+    service.db.upsert_repeat_schedule(
+        bot_id="sender-01",
+        pc_id="pc-01",
+        command="send_expected_tax_amounts",
+        payload={"year": 2025},
+        interval_sec=300,
+        next_run_at="2099-01-01T00:00:00Z",
+    )
+
+    stop_response = client.post(
+        "/ui/bots/sender-01/commands/stop",
+        follow_redirects=False,
+    )
+    assert stop_response.status_code == 303
+
+    schedules = _repeat_schedules(client, bot_id="sender-01", command="send_expected_tax_amounts")
+    assert len(schedules) == 1
+    assert schedules[0]["enabled"] == 0
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    assert commands[0]["command"] == "stop"
+
+
 def test_dashboard_can_queue_report_one_click_status_check_without_taxdoc_ids(tmp_path):
     client = build_client(tmp_path)
 

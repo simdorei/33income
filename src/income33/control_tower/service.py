@@ -449,8 +449,15 @@ class ControlTowerService:
             raise ValueError("expected tax amount commands are only allowed for sender bots")
         if policy.reporter_only and bot.get("bot_type") != "reporter":
             raise ValueError("tax report submit commands are only allowed for reporter bots")
-        if bot.get("bot_type") == "reporter" and not policy.preserves_repeat_schedule:
-            self.db.disable_repeat_schedule(bot_id=bot_id, command=REPORTER_ONE_CLICK_COMMAND)
+        if not policy.preserves_repeat_schedule:
+            repeat_schedule_commands = {
+                scheduled_command
+                for scheduled_command, scheduled_policy in _COMMAND_POLICIES.items()
+                if scheduled_policy.repeat_schedule_enabled
+            }
+            repeat_schedule_commands.add(REPORTER_ONE_CLICK_COMMAND)
+            for repeat_command in repeat_schedule_commands:
+                self.db.disable_repeat_schedule(bot_id=bot_id, command=repeat_command)
 
         queued = self.db.enqueue_command(
             pc_id=bot["pc_id"],
