@@ -1734,6 +1734,42 @@ def _calculation_type_from_value(value: Any) -> str | None:
     return None
 
 
+def _strings_for_keys_from_value(value: Any, keys: set[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(value, dict):
+        for key, child_value in value.items():
+            if str(key) in keys and child_value not in (None, ""):
+                values.append(str(child_value).strip())
+            values.extend(_strings_for_keys_from_value(child_value, keys))
+    elif isinstance(value, list):
+        for child_value in value:
+            values.extend(_strings_for_keys_from_value(child_value, keys))
+    return values
+
+
+def _is_estimate_or_simplified_expense_taxdoc(value: Any) -> bool:
+    calculation_types = _strings_for_keys_from_value(value, {"calculationType", "calculation_type"})
+    if any(raw.strip().upper() == "ESTIMATE" for raw in calculation_types):
+        return True
+
+    expense_rate_types = _strings_for_keys_from_value(
+        value,
+        {
+            "applyExpenseRateType",
+            "apply_expense_rate_type",
+            "expenseRateType",
+            "expense_rate_type",
+            "경비율유형",
+            "적용경비율유형",
+        },
+    )
+    for raw_expense_rate_type in expense_rate_types:
+        normalized = raw_expense_rate_type.strip().upper()
+        if normalized == "SIMPLIFIED_EXPENSE_RATE" or "단순" in raw_expense_rate_type:
+            return True
+    return False
+
+
 def _business_income_industry_codes(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return []
@@ -2181,7 +2217,12 @@ def submit_tax_reports(
             correction_results: list[dict[str, Any]] = []
             item_failed = False
             calculation_type = _calculation_type_from_value(business_data)
-            if calculation_type == "ESTIMATE":
+            if _is_estimate_or_simplified_expense_taxdoc(business_data):
+                correction_skipped_reason = (
+                    "calculation_type_estimate"
+                    if calculation_type == "ESTIMATE"
+                    else "estimate_or_simplified_expense_rate"
+                )
                 success_count += 1
                 _delete_tax_report_submit_response_logs_for_taxdoc(tax_doc_id=int(tax_doc_id))
                 _delete_tax_report_submit_failure_summaries_for_taxdoc(tax_doc_id=int(tax_doc_id))
@@ -2194,7 +2235,7 @@ def submit_tax_reports(
                         "calculation_type": calculation_type,
                         "correction_count": 0,
                         "correction_results": [],
-                        "correction_skipped_reason": "calculation_type_estimate",
+                        "correction_skipped_reason": correction_skipped_reason,
                     }
                 )
                 continue
@@ -2371,7 +2412,109 @@ def submit_tax_reports(
         status_chunk_size = max(1, min(20, requested_status_chunk_size))
 
         one_click_tax_doc_ids = list(tax_doc_ids)
+        requested_one_click_tax_doc_ids = list(one_click_tax_doc_ids)
         auto_fetch_pages: list[int] = []
+        custom_type_filter_fetch_pages: list[int] = []
+
+        def _fetch_one_click_tax_doc_ids_matching_custom_type_filter(
+            *,
+            target_tax_doc_ids: list[int],
+            custom_type_filter: str,
+        ) -> tuple[set[int], list[int]]:
+            requested_ids = {int(tax_doc_id) for tax_doc_id in target_tax_doc_ids}
+            if not requested_ids:
+                return set(), []
+            year = _resolve_taxdoc_year(payload)
+            workflow_filter_set = str(payload.get("workflow_filter_set") or payload.get("workflowFilterSet") or "SUBMIT_READY")
+            review_type_filter = str(payload.get("review_type_filter") or payload.get("reviewTypeFilter") or "NORMAL")
+            apply_expense_rate_type_filter = str(
+                payload.get("apply_expense_rate_type_filter") or payload.get("applyExpenseRateTypeFilter") or "ALL"
+            )
+            sort_field = str(payload.get("sort") or payload.get("sort_field") or payload.get("sortField") or "SUBMIT_REQUEST_DATE_TIME")
+            direction = str(payload.get("direction") or "ASC").upper()
+
+            office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+            office_response = _browser_fetch_json(
+                page,
+                url=office_url,
+                headers={
+                    "accept": "application/json, text/plain, */*",
+                    "x-host": "GROUND",
+                    "x-web-path": submit_web_path,
+                },
+            )
+            office_json = office_response.get("json") or {}
+            if not office_response.get("ok") or not office_json.get("ok"):
+                raise RuntimeError(f"office lookup failed status={office_response.get('status')}")
+            offices = office_json.get("data") or []
+            if not offices:
+                raise RuntimeError("office lookup returned no offices")
+            office_id, _office_index = _resolve_tax_office_selection(
+                offices=list(offices),
+                payload=payload,
+                bot_id=bot_id,
+            )
+
+            matched_ids: set[int] = set()
+            fetched_pages: list[int] = []
+            page_index = max(0, int(payload.get("page", 0)))
+            total_pages: int | None = None
+            while True:
+                list_url = _taxdoc_filter_search_url(
+                    api_base_url=api_base_url,
+                    office_id=office_id,
+                    year=year,
+                    page=page_index,
+                    size=fetch_page_size,
+                    workflow_filter_set=workflow_filter_set,
+                    tax_doc_custom_type_filter=custom_type_filter,
+                    apply_expense_rate_type_filter=apply_expense_rate_type_filter,
+                    review_type_filter=review_type_filter,
+                    sort_field=sort_field,
+                    direction=direction,
+                )
+                list_response = _browser_fetch_json(
+                    page,
+                    url=list_url,
+                    headers={
+                        "accept": "application/json, text/plain, */*",
+                        "x-host": "GIT",
+                        "x-web-path": submit_web_path,
+                    },
+                )
+                list_json = list_response.get("json") or {}
+                if not list_response.get("ok") or not list_json.get("ok"):
+                    raise RuntimeError(f"taxdoc list failed page={page_index + 1} status={list_response.get('status')}")
+                data = list_json.get("data") if isinstance(list_json, dict) else {}
+                data = data if isinstance(data, dict) else {}
+                rows = data.get("content") if isinstance(data.get("content"), list) else []
+                fetched_pages.append(page_index)
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    raw_tax_doc_id = row.get("taxDocId")
+                    try:
+                        normalized_tax_doc_id = int(raw_tax_doc_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if normalized_tax_doc_id in requested_ids:
+                        matched_ids.add(normalized_tax_doc_id)
+                if requested_ids.issubset(matched_ids):
+                    break
+
+                raw_total_pages = data.get("totalPages")
+                if total_pages is None:
+                    try:
+                        total_pages = max(0, int(raw_total_pages))
+                    except (TypeError, ValueError):
+                        total_pages = None
+                if total_pages is not None:
+                    if total_pages <= 0 or page_index + 1 >= total_pages:
+                        break
+                elif len(rows) < fetch_page_size:
+                    break
+                page_index += 1
+            return matched_ids, fetched_pages
 
         if one_click_status_check_enabled:
             if not one_click_tax_doc_ids:
@@ -2482,6 +2625,22 @@ def submit_tax_reports(
             one_click_tax_doc_ids = (
                 collected_tax_doc_ids if max_auto_targets is None else collected_tax_doc_ids[:max_auto_targets]
             )
+
+        if (
+            requested_one_click_tax_doc_ids
+            and not one_click_status_check_enabled
+            and str(payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "NONE").strip().upper()
+            not in {"", "NONE", "ALL"}
+        ):
+            requested_custom_type_filter = str(
+                payload.get("tax_doc_custom_type_filter") or payload.get("taxDocCustomTypeFilter") or "NONE"
+            ).strip()
+            matched_tax_doc_ids, fetched_pages = _fetch_one_click_tax_doc_ids_matching_custom_type_filter(
+                target_tax_doc_ids=requested_one_click_tax_doc_ids,
+                custom_type_filter=requested_custom_type_filter,
+            )
+            custom_type_filter_fetch_pages.extend(fetched_pages)
+            one_click_tax_doc_ids = [tax_doc_id for tax_doc_id in one_click_tax_doc_ids if tax_doc_id in matched_tax_doc_ids]
 
         if not one_click_tax_doc_ids:
             return {
@@ -2902,8 +3061,78 @@ def submit_tax_reports(
             or "아"
         ).strip() or None
 
+        tax_amount_guard_checked_ids: set[int] = set()
+
         for attempt_index, tax_doc_id in enumerate(prepare_target_ids, start=1):
             normalized_tax_doc_id = int(tax_doc_id)
+
+            summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
+            try:
+                summary_response = _browser_fetch_json(
+                    page,
+                    url=summary_url,
+                    method="GET",
+                    headers=headers,
+                )
+            except Exception as exc:
+                summary_response = {
+                    "ok": False,
+                    "status": 0,
+                    "url": summary_url,
+                    "json": None,
+                    "text": None,
+                    "fetch_error": str(exc),
+                }
+            summary_json = summary_response.get("json") or {}
+            if not summary_response.get("ok") or _response_json_ok(summary_json) is False:
+                failure, log_path, summary_log_path = _build_failure(
+                    tax_doc_id=normalized_tax_doc_id,
+                    stage="tax_amount_summary",
+                    stage_label="예상/최종세액요약조회",
+                    response=summary_response,
+                    request_method="GET",
+                    request_url=summary_url,
+                    request_body=None,
+                    attempt_index=attempt_index,
+                    extra={"poll_count": 0},
+                )
+                failures.append(failure)
+                results.append({**failure, "status": "skipped", "poll_count": 0})
+                continue
+            try:
+                customer_tax_guard = _customer_tax_difference_guard_from_summary(summary_json)
+            except Exception as guard_exc:
+                summary_guard_response = {
+                    **summary_response,
+                    "json": {
+                        **(summary_json if isinstance(summary_json, dict) else {}),
+                        "error": str(guard_exc),
+                    },
+                }
+                failure, log_path, summary_log_path = _build_failure(
+                    tax_doc_id=normalized_tax_doc_id,
+                    stage="tax_amount_summary_guard",
+                    stage_label="예상/최종세액요약검증",
+                    response=summary_guard_response,
+                    request_method="GET",
+                    request_url=summary_url,
+                    request_body=None,
+                    attempt_index=attempt_index,
+                    extra={"poll_count": 0, "failure_reason": str(guard_exc)},
+                )
+                failures.append(failure)
+                results.append({**failure, "status": "skipped", "poll_count": 0})
+                continue
+            tax_amount_guard_checked_ids.add(normalized_tax_doc_id)
+            if customer_tax_guard.get("unfavorable"):
+                _mark_unfavorable_tax_difference_waiting(
+                    normalized_tax_doc_id=normalized_tax_doc_id,
+                    attempt_index=attempt_index,
+                    submit_category=None,
+                    guard=customer_tax_guard,
+                )
+                continue
+
             business_incomes_url = f"{api_base_url}/api/tax/v1/gitax/gross-incomes-prepaid-tax/{normalized_tax_doc_id}/business-incomes"
             try:
                 business_response = _browser_fetch_json(
@@ -2941,7 +3170,7 @@ def submit_tax_reports(
             business_data = business_json.get("data") or {}
             item_failed = False
             calculation_type = _calculation_type_from_value(business_data)
-            if calculation_type == "ESTIMATE":
+            if _is_estimate_or_simplified_expense_taxdoc(business_data):
                 eligible_tax_doc_ids.append(normalized_tax_doc_id)
                 continue
 
@@ -2959,6 +3188,17 @@ def submit_tax_reports(
                 if not raw_business_number or raw_business_number in business_numbers:
                     continue
                 business_numbers.append(raw_business_number)
+
+            if blocked_industry_codes:
+                _mark_blocked_industry_skip(
+                    normalized_tax_doc_id=normalized_tax_doc_id,
+                    business_numbers=business_numbers,
+                    blocked_industry_codes=blocked_industry_codes,
+                    calculation_type=calculation_type,
+                    correction_count=0,
+                    correction_skipped_reason="blocked_industry_before_minus_amount_correction",
+                )
+                continue
 
             for business_number in business_numbers:
                 business_income_type = "PERSONAL" if business_number == ZERO_BUSINESS_NUMBER else "BUSINESS"
@@ -3037,15 +3277,6 @@ def submit_tax_reports(
                 break
 
             if item_failed:
-                continue
-            if blocked_industry_codes:
-                _mark_blocked_industry_skip(
-                    normalized_tax_doc_id=normalized_tax_doc_id,
-                    business_numbers=business_numbers,
-                    blocked_industry_codes=blocked_industry_codes,
-                    calculation_type=calculation_type,
-                    correction_count=len(business_numbers),
-                )
                 continue
             eligible_tax_doc_ids.append(normalized_tax_doc_id)
 
@@ -3145,75 +3376,76 @@ def submit_tax_reports(
                     results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
                     continue
 
-                summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
-                try:
-                    summary_response = _browser_fetch_json(
-                        page,
-                        url=summary_url,
-                        method="GET",
-                        headers=headers,
-                    )
-                except Exception as exc:
-                    summary_response = {
-                        "ok": False,
-                        "status": 0,
-                        "url": summary_url,
-                        "json": None,
-                        "text": None,
-                        "fetch_error": str(exc),
-                    }
-                summary_json = summary_response.get("json") or {}
-                if not summary_response.get("ok") or _response_json_ok(summary_json) is False:
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="tax_amount_summary",
-                        stage_label="예상/최종세액요약조회",
-                        response=summary_response,
-                        request_method="GET",
-                        request_url=summary_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={"submit_category": submit_category, "poll_count": 0},
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
-                    continue
-                try:
-                    customer_tax_guard = _customer_tax_difference_guard_from_summary(summary_json)
-                except Exception as guard_exc:
-                    summary_guard_response = {
-                        **summary_response,
-                        "json": {
-                            **(summary_json if isinstance(summary_json, dict) else {}),
-                            "error": str(guard_exc),
-                        },
-                    }
-                    failure, log_path, summary_log_path = _build_failure(
-                        tax_doc_id=normalized_tax_doc_id,
-                        stage="tax_amount_summary_guard",
-                        stage_label="예상/최종세액요약검증",
-                        response=summary_guard_response,
-                        request_method="GET",
-                        request_url=summary_url,
-                        request_body=None,
-                        attempt_index=attempt_index,
-                        extra={
-                            "submit_category": submit_category,
-                            "poll_count": 0,
-                            "failure_reason": str(guard_exc),
-                        },
-                    )
-                    failures.append(failure)
-                    results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
-                    continue
-                if customer_tax_guard.get("unfavorable"):
-                    _mark_unfavorable_tax_difference_waiting(
-                        normalized_tax_doc_id=normalized_tax_doc_id,
-                        attempt_index=attempt_index,
-                        submit_category=submit_category,
-                        guard=customer_tax_guard,
-                    )
-                    continue
+                if normalized_tax_doc_id not in tax_amount_guard_checked_ids:
+                    summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
+                    try:
+                        summary_response = _browser_fetch_json(
+                            page,
+                            url=summary_url,
+                            method="GET",
+                            headers=headers,
+                        )
+                    except Exception as exc:
+                        summary_response = {
+                            "ok": False,
+                            "status": 0,
+                            "url": summary_url,
+                            "json": None,
+                            "text": None,
+                            "fetch_error": str(exc),
+                        }
+                    summary_json = summary_response.get("json") or {}
+                    if not summary_response.get("ok") or _response_json_ok(summary_json) is False:
+                        failure, log_path, summary_log_path = _build_failure(
+                            tax_doc_id=normalized_tax_doc_id,
+                            stage="tax_amount_summary",
+                            stage_label="예상/최종세액요약조회",
+                            response=summary_response,
+                            request_method="GET",
+                            request_url=summary_url,
+                            request_body=None,
+                            attempt_index=attempt_index,
+                            extra={"submit_category": submit_category, "poll_count": 0},
+                        )
+                        failures.append(failure)
+                        results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
+                        continue
+                    try:
+                        customer_tax_guard = _customer_tax_difference_guard_from_summary(summary_json)
+                    except Exception as guard_exc:
+                        summary_guard_response = {
+                            **summary_response,
+                            "json": {
+                                **(summary_json if isinstance(summary_json, dict) else {}),
+                                "error": str(guard_exc),
+                            },
+                        }
+                        failure, log_path, summary_log_path = _build_failure(
+                            tax_doc_id=normalized_tax_doc_id,
+                            stage="tax_amount_summary_guard",
+                            stage_label="예상/최종세액요약검증",
+                            response=summary_guard_response,
+                            request_method="GET",
+                            request_url=summary_url,
+                            request_body=None,
+                            attempt_index=attempt_index,
+                            extra={
+                                "submit_category": submit_category,
+                                "poll_count": 0,
+                                "failure_reason": str(guard_exc),
+                            },
+                        )
+                        failures.append(failure)
+                        results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
+                        continue
+                    if customer_tax_guard.get("unfavorable"):
+                        _mark_unfavorable_tax_difference_waiting(
+                            normalized_tax_doc_id=normalized_tax_doc_id,
+                            attempt_index=attempt_index,
+                            submit_category=submit_category,
+                            guard=customer_tax_guard,
+                        )
+                        continue
 
                 try:
                     start_response = _browser_fetch_json(

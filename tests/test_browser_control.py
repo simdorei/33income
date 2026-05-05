@@ -2260,7 +2260,20 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
             return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
         if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
             assert method == "GET"
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "BOOKKEEPING",
+                        "applyExpenseRateType": "SIMPLIFIED_EXPENSE_RATE",
+                        "summary": {"itemList": [{"사업자번호": "123-45-67890"}]},
+                    },
+                },
+            }
+        if "/minus-amount/correction" in url:
+            raise AssertionError("SIMPLIFIED_EXPENSE_RATE taxdoc must not call minus-amount correction")
 
         assert headers == {
             "accept": "application/json, text/plain, */*",
@@ -2739,6 +2752,43 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
     assert {row["tax_doc_custom_type_filter"] for row in in_progress_lines} == {"가"}
 
 
+def test_submit_tax_reports_one_click_manual_ids_respect_custom_type_filter(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 327}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query["taxDocCustomTypeFilter"] == ["아"]
+            assert query["workflowFilterSet"] == ["SUBMIT_READY"]
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"content": [{"taxDocId": 4102}], "totalElements": 1, "totalPages": 1}},
+            }
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            raise AssertionError("manual taxDocId outside selected custom type must not be assigned/submitted")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [4101], "one_click_submit": True, "tax_doc_custom_type_filter": "아"},
+    )
+
+    assert result["ok"] is True
+    assert result["current_step"] == "신고제출 대상 없음"
+    assert result["tax_doc_ids"] == []
+    assert not any(call["url"].endswith("/taxdocs/tax-accountants/assign") for call in calls)
+
+
 def test_submit_tax_reports_one_click_auto_fetch_targets_without_max_limit_fetches_all_pages(monkeypatch):
     fetched_pages = []
     expected_tax_doc_ids = list(range(7001, 7251))
@@ -3123,6 +3173,9 @@ def test_submit_tax_reports_one_click_real_estate_code_sets_custom_type_ah_after
             assert method == "PUT"
             assert json_body == {"taxAccountantId": 817, "taxDocIdList": [5101]}
             return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/5101/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/5101/business-incomes"):
             return {
                 "ok": True,
@@ -3136,8 +3189,7 @@ def test_submit_tax_reports_one_click_real_estate_code_sets_custom_type_ah_after
                 },
             }
         if url.endswith("bookkeeping/5101/minus-amount/correction?businessNumber=123-45-67890&businessIncomeType=BUSINESS"):
-            assert method == "POST"
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+            raise AssertionError("blocked real-estate industry code must not call minus-amount correction")
         if url.endswith("/api/tax/v1/taxdocs/5101/custom-type"):
             assert method == "PUT"
             assert json_body == {"customType": "아"}
@@ -3162,9 +3214,10 @@ def test_submit_tax_reports_one_click_real_estate_code_sets_custom_type_ah_after
     assert result["results"][0]["stage"] == "blocked_industry_code"
     assert result["results"][0]["custom_type"] == "아"
     assert result["results"][0]["blocked_industry_codes"] == ["701101"]
-    correction_index = next(i for i, call in enumerate(calls) if "/minus-amount/correction" in call["url"])
     custom_type_index = next(i for i, call in enumerate(calls) if call["url"].endswith("/api/tax/v1/taxdocs/5101/custom-type"))
-    assert correction_index < custom_type_index
+    business_income_index = next(i for i, call in enumerate(calls) if call["url"].endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/5101/business-incomes"))
+    assert business_income_index < custom_type_index
+    assert not any("/minus-amount/correction" in call["url"] for call in calls)
     assert not any("/api/tax/v1/gitax/submit/5101/" in call["url"] for call in calls)
 
 
