@@ -261,10 +261,21 @@ def register_bot_command_routes(app: FastAPI) -> None:
             await read_form_value(request, "tax_doc_ids"),
             allow_empty=True,
         )
-        payload_data = {"tax_doc_ids": tax_doc_ids, "one_click_submit": True}
+        custom_type_filter = _normalize_reporter_one_click_custom_type_filter(
+            await read_form_value(request, "tax_doc_custom_type_filter")
+        )
+        payload_data = {
+            "tax_doc_ids": tax_doc_ids,
+            "one_click_submit": True,
+            "tax_doc_custom_type_filter": custom_type_filter,
+            "taxDocCustomTypeFilter": custom_type_filter,
+        }
         try:
             if not tax_doc_ids:
-                app.state.service.start_reporter_one_click_submit_repeat(bot_id=bot_id)
+                app.state.service.start_reporter_one_click_submit_repeat(
+                    bot_id=bot_id,
+                    custom_type_filter=custom_type_filter,
+                )
             else:
                 app.state.service.queue_bot_command(
                     bot_id=bot_id,

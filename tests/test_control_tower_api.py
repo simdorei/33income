@@ -218,16 +218,16 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "수동 신고준비(고급)" in root.text
     assert "수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
     assert "자동조회 신고제출 실행" in root.text
-    assert "입력칸 없이 SUBMIT_READY/유형 NONE/검토 NORMAL 대상을 자동조회" in root.text
-    assert "SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출" in root.text
+    assert "입력칸 없이 SUBMIT_READY/선택 유형/검토 NORMAL 대상을 자동조회" in root.text
+    assert "SUBMIT_READY · 선택 유형(기본 NONE) · 검토 NORMAL 전체조회 후 5분 반복 신고제출" in root.text
     assert "전체 계산발송" in root.text
     assert "전체 단순경비율 목록발송" in root.text
     assert "전체 경비율 장부발송" in root.text
     assert "전체 자동조회 신고제출 실행" in root.text
     assert "자동조회 신고제출 유형" in root.text
-    assert "name='tax_doc_custom_type_filter'" in root.text
+    assert root.text.count("name='tax_doc_custom_type_filter'") == 19
     assert "value='ALL'" in root.text
-    assert "value='NONE' selected" in root.text
+    assert root.text.count("value='NONE' selected") == 19
     assert "value='아'" in root.text
     assert "/ui/commands/senders/send-expected-tax-amounts-all" in root.text
     assert "/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all" in root.text
@@ -816,6 +816,22 @@ def test_dashboard_can_queue_report_one_click_submit_from_taxdoc_id_list_for_rep
     assert '"one_click_submit": true' in commands[0]["payload_json"]
     assert '"prepare_only"' not in commands[0]["payload_json"]
 
+    typed_response = client.post(
+        "/ui/bots/reporter-02/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "3001", "tax_doc_custom_type_filter": "마"},
+        follow_redirects=False,
+    )
+    assert typed_response.status_code == 303
+    typed_polled = client.get("/api/agents/pc-11/commands/poll")
+    assert typed_polled.status_code == 200
+    typed_commands = typed_polled.json()["commands"]
+    assert len(typed_commands) == 1
+    assert typed_commands[0]["command"] == "submit_tax_reports"
+    typed_payload = typed_commands[0]["payload_json"]
+    assert '"tax_doc_ids": [3001]' in typed_payload
+    assert '"tax_doc_custom_type_filter": "마"' in typed_payload
+    assert '"taxDocCustomTypeFilter": "마"' in typed_payload
+
     sender_response = client.post(
         "/ui/bots/sender-01/tax-report-one-click-submit-list",
         data={"tax_doc_ids": "2001"},
@@ -852,6 +868,50 @@ def test_dashboard_can_queue_report_one_click_submit_without_taxdoc_ids(tmp_path
     _assert_reporter_none_one_click_payload(payload)
     assert payload["maxAutoTargets"] == 0
     assert payload["repeat"] is True
+
+
+def test_dashboard_individual_reporter_one_click_repeat_applies_selected_custom_type(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   ", "tax_doc_custom_type_filter": "아"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    schedules = _repeat_schedules(client, bot_id="reporter-01", command="submit_tax_reports")
+    assert len(schedules) == 1
+    schedule_payload = _decoded_payload(schedules[0])
+    assert schedule_payload["tax_doc_custom_type_filter"] == "아"
+    assert schedule_payload["taxDocCustomTypeFilter"] == "아"
+    assert schedule_payload["workflow_filter_set"] == "SUBMIT_READY"
+    assert schedule_payload["review_type_filter"] == "NORMAL"
+
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert len(commands) == 1
+    command_payload = _decoded_payload(commands[0])
+    assert command_payload["tax_doc_custom_type_filter"] == "아"
+    assert command_payload["taxDocCustomTypeFilter"] == "아"
+    assert command_payload["repeat"] is True
+
+
+def test_dashboard_rejects_invalid_individual_reporter_one_click_custom_type(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/ui/bots/reporter-01/tax-report-one-click-submit-list",
+        data={"tax_doc_ids": "   ", "tax_doc_custom_type_filter": "BAD"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert "invalid tax_doc_custom_type_filter" in response.text
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    assert polled.json()["commands"] == []
 
 
 def test_control_tower_queues_due_reporter_submit_repeat_on_poll_without_reporter_memory(tmp_path):

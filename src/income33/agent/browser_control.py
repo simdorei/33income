@@ -1646,6 +1646,7 @@ ONE_CLICK_SUBMIT_MODES = {"one_click", "ta_oneclick", "ta-submit"}
 ONE_CLICK_PROGRESS_STATUSES = {"IN_PROGRESS", "PENDING", "RUNNING", "WAITING"}
 ONE_CLICK_SUCCESS_STATUSES = {"COMPLETE", "COMPLETED", "SUCCESS", "DONE", "FINISHED", "SUBMITTED"}
 ONE_CLICK_FAILURE_STATUSES = {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED"}
+UNFAVORABLE_CUSTOMER_TAX_CUSTOM_TYPE = "마"
 
 
 def _truthy_payload_flag(payload: dict[str, Any], *keys: str) -> bool:
@@ -1816,6 +1817,77 @@ def _one_click_submit_block_reason_from_response(response_json: Any) -> str | No
             return _redact_sensitive_summary_text(normalized_message)
 
     return None
+
+
+def _amount_int_from_summary(value: Any, *, label: str) -> int:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"missing {label}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"invalid non-integer {label}")
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        raise ValueError(f"missing {label}")
+    return int(text)
+
+
+def _summary_data_from_response_json(response_json: Any) -> dict[str, Any]:
+    if not isinstance(response_json, dict):
+        raise ValueError("summary response must be a JSON object")
+    data = response_json.get("data")
+    if isinstance(data, dict):
+        return data
+    return response_json
+
+
+def _customer_tax_difference_guard_from_summary(response_json: Any) -> dict[str, Any]:
+    summary_data = _summary_data_from_response_json(response_json)
+    expected = summary_data.get("예상세액")
+    final_customer = summary_data.get("최종세액_고객계정")
+    if not isinstance(expected, dict):
+        raise ValueError("summary missing 예상세액")
+    if not isinstance(final_customer, dict):
+        raise ValueError("summary missing 최종세액_고객계정")
+
+    expected_national = _amount_int_from_summary(
+        expected.get("납부환급할세액_종합소득세"),
+        label="예상세액.납부환급할세액_종합소득세",
+    )
+    final_national = _amount_int_from_summary(
+        final_customer.get("납부환급할세액_종합소득세"),
+        label="최종세액_고객계정.납부환급할세액_종합소득세",
+    )
+    expected_local = _amount_int_from_summary(
+        expected.get("납부환급할세액_지방소득세"),
+        label="예상세액.납부환급할세액_지방소득세",
+    )
+    final_local = _amount_int_from_summary(
+        final_customer.get("납부환급할세액_지방소득세"),
+        label="최종세액_고객계정.납부환급할세액_지방소득세",
+    )
+
+    return {
+        "unfavorable": final_national > expected_national,
+        "expected_national_tax_amount": expected_national,
+        "final_national_tax_amount": final_national,
+        "expected_local_tax_amount": expected_local,
+        "final_local_tax_amount": final_local,
+        "national_tax_difference": final_national - expected_national,
+        "local_tax_difference": final_local - expected_local,
+    }
+
+
+def _customer_waiting_payload_from_tax_difference_guard(guard: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "종합소득세_신고할세액": guard["final_national_tax_amount"],
+        "종합소득세_예상세액": guard["expected_national_tax_amount"],
+        "지방소득세_신고할세액": guard["final_local_tax_amount"],
+        "지방소득세_예상세액": guard["expected_local_tax_amount"],
+        "forceSubmit": False,
+    }
 
 
 def submit_tax_reports(
@@ -2449,6 +2521,9 @@ def submit_tax_reports(
         success_count = 0
         in_progress_count = 0
         blocked_industry_skip_count = 0
+        unfavorable_tax_difference_skip_count = 0
+        unfavorable_custom_type_failed_count = 0
+        customer_waiting_failed_count = 0
 
         def _mark_blocked_industry_skip(
             *,
@@ -2497,6 +2572,94 @@ def submit_tax_reports(
             if correction_skipped_reason:
                 result["correction_skipped_reason"] = correction_skipped_reason
             results.append(result)
+
+        def _mark_unfavorable_tax_difference_waiting(
+            *,
+            normalized_tax_doc_id: int,
+            attempt_index: int,
+            submit_category: str | None,
+            guard: dict[str, Any],
+        ) -> None:
+            nonlocal unfavorable_tax_difference_skip_count, unfavorable_custom_type_failed_count, customer_waiting_failed_count
+            custom_type_status_code: int | None = None
+            custom_type_error: str | None = None
+            customer_waiting_status_code: int | None = None
+            customer_waiting_error: str | None = None
+            waiting_payload = _customer_waiting_payload_from_tax_difference_guard(guard)
+            try:
+                custom_response = _put_custom_type_for_taxdoc(
+                    page=page,
+                    api_base_url=api_base_url,
+                    tax_doc_id=normalized_tax_doc_id,
+                    headers={**headers, "x-web-path": "https://newta.3o3.co.kr/git/summary"},
+                    custom_type=UNFAVORABLE_CUSTOMER_TAX_CUSTOM_TYPE,
+                )
+                custom_type_status_code = custom_response.get("status")
+            except Exception as custom_exc:
+                unfavorable_custom_type_failed_count += 1
+                custom_type_error = str(custom_exc)
+                logger.exception(
+                    "tax_report_unfavorable_tax_difference_custom_type_failed bot_id=%s tax_doc_id=%s custom_type=%s",
+                    bot_id,
+                    normalized_tax_doc_id,
+                    UNFAVORABLE_CUSTOMER_TAX_CUSTOM_TYPE,
+                )
+
+            if custom_type_error is None:
+                customer_waiting_url = f"{api_base_url}/api/tax/v1/gitax/submit/{normalized_tax_doc_id}/ta-submit/send/customer-waiting"
+                try:
+                    customer_waiting_response = _browser_fetch_json(
+                        page,
+                        url=customer_waiting_url,
+                        method="POST",
+                        headers=headers,
+                        json_body=waiting_payload,
+                    )
+                    customer_waiting_status_code = customer_waiting_response.get("status")
+                    customer_waiting_json_ok = _response_json_ok(customer_waiting_response.get("json"))
+                    if not customer_waiting_response.get("ok") or customer_waiting_json_ok is False:
+                        customer_waiting_failed_count += 1
+                        customer_waiting_error = _report_failure_reason(
+                            customer_waiting_response,
+                            customer_waiting_response.get("json"),
+                        )
+                except Exception as waiting_exc:
+                    customer_waiting_failed_count += 1
+                    customer_waiting_error = str(waiting_exc)
+                    logger.exception(
+                        "tax_report_unfavorable_tax_difference_customer_waiting_failed bot_id=%s tax_doc_id=%s",
+                        bot_id,
+                        normalized_tax_doc_id,
+                    )
+
+            unfavorable_tax_difference_skip_count += 1
+            results.append(
+                {
+                    "tax_doc_id": normalized_tax_doc_id,
+                    "status": "skipped",
+                    "stage": "customer_tax_difference_guard",
+                    "stage_label": "예상대비 고객최종세액 불리",
+                    "submit_category": submit_category,
+                    "custom_type": UNFAVORABLE_CUSTOMER_TAX_CUSTOM_TYPE,
+                    "custom_type_status_code": custom_type_status_code,
+                    "custom_type_error": custom_type_error,
+                    "customer_waiting_status_code": customer_waiting_status_code,
+                    "customer_waiting_error": customer_waiting_error,
+                    "customer_waiting_payload": waiting_payload,
+                    "attempt_index": attempt_index,
+                    **guard,
+                }
+            )
+            logger.warning(
+                "tax_report_unfavorable_tax_difference_guarded bot_id=%s tax_doc_id=%s expected_national=%s final_national=%s custom_type=%s customer_waiting_status=%s customer_waiting_error=%s",
+                bot_id,
+                normalized_tax_doc_id,
+                guard.get("expected_national_tax_amount"),
+                guard.get("final_national_tax_amount"),
+                UNFAVORABLE_CUSTOMER_TAX_CUSTOM_TYPE,
+                customer_waiting_status_code,
+                customer_waiting_error,
+            )
 
         def _check_status(
             *,
@@ -2982,6 +3145,76 @@ def submit_tax_reports(
                     results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
                     continue
 
+                summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
+                try:
+                    summary_response = _browser_fetch_json(
+                        page,
+                        url=summary_url,
+                        method="GET",
+                        headers=headers,
+                    )
+                except Exception as exc:
+                    summary_response = {
+                        "ok": False,
+                        "status": 0,
+                        "url": summary_url,
+                        "json": None,
+                        "text": None,
+                        "fetch_error": str(exc),
+                    }
+                summary_json = summary_response.get("json") or {}
+                if not summary_response.get("ok") or _response_json_ok(summary_json) is False:
+                    failure, log_path, summary_log_path = _build_failure(
+                        tax_doc_id=normalized_tax_doc_id,
+                        stage="tax_amount_summary",
+                        stage_label="예상/최종세액요약조회",
+                        response=summary_response,
+                        request_method="GET",
+                        request_url=summary_url,
+                        request_body=None,
+                        attempt_index=attempt_index,
+                        extra={"submit_category": submit_category, "poll_count": 0},
+                    )
+                    failures.append(failure)
+                    results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
+                    continue
+                try:
+                    customer_tax_guard = _customer_tax_difference_guard_from_summary(summary_json)
+                except Exception as guard_exc:
+                    summary_guard_response = {
+                        **summary_response,
+                        "json": {
+                            **(summary_json if isinstance(summary_json, dict) else {}),
+                            "error": str(guard_exc),
+                        },
+                    }
+                    failure, log_path, summary_log_path = _build_failure(
+                        tax_doc_id=normalized_tax_doc_id,
+                        stage="tax_amount_summary_guard",
+                        stage_label="예상/최종세액요약검증",
+                        response=summary_guard_response,
+                        request_method="GET",
+                        request_url=summary_url,
+                        request_body=None,
+                        attempt_index=attempt_index,
+                        extra={
+                            "submit_category": submit_category,
+                            "poll_count": 0,
+                            "failure_reason": str(guard_exc),
+                        },
+                    )
+                    failures.append(failure)
+                    results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
+                    continue
+                if customer_tax_guard.get("unfavorable"):
+                    _mark_unfavorable_tax_difference_waiting(
+                        normalized_tax_doc_id=normalized_tax_doc_id,
+                        attempt_index=attempt_index,
+                        submit_category=submit_category,
+                        guard=customer_tax_guard,
+                    )
+                    continue
+
                 try:
                     start_response = _browser_fetch_json(
                         page,
@@ -3057,18 +3290,22 @@ def submit_tax_reports(
                 )
 
         failed_count = len(failures)
-        skipped_count = failed_count + blocked_industry_skip_count
+        skipped_count = failed_count + blocked_industry_skip_count + unfavorable_tax_difference_skip_count
         log_file_name = log_path.name if log_path else TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
         summary_log_file_name = summary_log_path.name if summary_log_path else TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE
         log_label = log_file_name if failed_count else "없음"
         summary_log_label = summary_log_file_name if failed_count else "없음"
+        guard_issue_count = unfavorable_custom_type_failed_count + customer_waiting_failed_count
+        custom_type_failure_label = f" 마분류실패={unfavorable_custom_type_failed_count}건" if unfavorable_custom_type_failed_count else ""
+        waiting_failure_label = f" 고객대기실패={customer_waiting_failed_count}건" if customer_waiting_failed_count else ""
         return {
-            "ok": failed_count == 0,
+            "ok": failed_count == 0 and guard_issue_count == 0,
             "dry_run": False,
-            "status": "session_active" if failed_count == 0 else "manual_required",
+            "status": "session_active" if failed_count == 0 and guard_issue_count == 0 else "manual_required",
             "current_step": (
                 f"{report_label} 완료 성공={success_count}건 진행중={in_progress_count}건 "
-                f"패스={skipped_count}건 실패={failed_count}건 공유로그={summary_log_label} 원본로그={log_label}"
+                f"패스={skipped_count}건 실패={failed_count}건 불리차이대기={unfavorable_tax_difference_skip_count}건"
+                f"{custom_type_failure_label}{waiting_failure_label} 공유로그={summary_log_label} 원본로그={log_label}"
             ),
             "debug_port": debug_port,
             "run_id": run_id,
@@ -3078,6 +3315,9 @@ def submit_tax_reports(
             "in_progress_count": in_progress_count,
             "skipped_count": skipped_count,
             "blocked_industry_skip_count": blocked_industry_skip_count,
+            "unfavorable_tax_difference_skip_count": unfavorable_tax_difference_skip_count,
+            "unfavorable_custom_type_failed_count": unfavorable_custom_type_failed_count,
+            "customer_waiting_failed_count": customer_waiting_failed_count,
             "failed_count": failed_count,
             "tax_doc_ids": one_click_tax_doc_ids,
             "eligible_tax_doc_ids": eligible_tax_doc_ids,

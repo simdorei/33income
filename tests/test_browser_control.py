@@ -66,6 +66,32 @@ class FakePage:
         raise AssertionError("already on NewTA page")
 
 
+def _one_click_summary_response(
+    *,
+    expected_national=-605_445,
+    final_national=-605_445,
+    expected_local=-60_544,
+    final_local=-60_544,
+):
+    return {
+        "ok": True,
+        "status": 200,
+        "json": {
+            "data": {
+                "예상세액": {
+                    "납부환급할세액_종합소득세": expected_national,
+                    "납부환급할세액_지방소득세": expected_local,
+                },
+                "최종세액_고객계정": {
+                    "납부환급할세액_종합소득세": final_national,
+                    "납부환급할세액_지방소득세": final_local,
+                },
+            },
+            "error": None,
+        },
+    }
+
+
 class RefreshFakePage:
     def __init__(self, url="https://newta.3o3.co.kr/tasks/git"):
         self.url = url
@@ -2244,6 +2270,9 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
         if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
             assert method == "GET"
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
             assert method == "PUT"
             assert json_body == {"submitUserType": "APP_USER"}
@@ -2281,6 +2310,121 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
     assert result["results"][0]["poll_count"] == 1
     assert sum(1 for call in calls if call["method"] == "PUT" and call["url"].endswith("/ta-submit")) == 1
     assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
+
+
+def test_submit_tax_reports_one_click_blocks_unfavorable_customer_tax_difference(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"calculationType": "ESTIMATE", "summary": {"itemList": []}}},
+            }
+        if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
+            assert method == "GET"
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/3001/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response(
+                expected_national=-605_445,
+                final_national=-305_445,
+                expected_local=-60_544,
+                final_local=-30_544,
+            )
+        if url.endswith("/api/tax/v1/taxdocs/3001/custom-type"):
+            assert method == "PUT"
+            assert headers["x-web-path"] == "https://newta.3o3.co.kr/git/summary"
+            assert json_body == {"customType": "마"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/send/customer-waiting"):
+            assert method == "POST"
+            assert json_body == {
+                "종합소득세_신고할세액": -305_445,
+                "종합소득세_예상세액": -605_445,
+                "지방소득세_신고할세액": -30_544,
+                "지방소득세_예상세액": -60_544,
+                "forceSubmit": False,
+            }
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            raise AssertionError("unfavorable tax difference must not call final ta-submit PUT")
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            raise AssertionError("unfavorable tax difference must not poll submit status")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001], "one_click_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is True
+    assert result["success_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["unfavorable_tax_difference_skip_count"] == 1
+    assert result["customer_waiting_failed_count"] == 0
+    assert result["results"][0]["stage"] == "customer_tax_difference_guard"
+    assert result["results"][0]["custom_type"] == "마"
+    assert result["results"][0]["customer_waiting_payload"]["forceSubmit"] is False
+    assert not any(call["url"].endswith("/api/tax/v1/gitax/submit/3001/ta-submit") for call in calls)
+
+
+def test_submit_tax_reports_one_click_customer_waiting_failure_still_does_not_submit(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"calculationType": "ESTIMATE"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/3001/submits/summary"):
+            return _one_click_summary_response(expected_national=10_000, final_national=20_000, expected_local=1_000, final_local=2_000)
+        if url.endswith("/api/tax/v1/taxdocs/3001/custom-type"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/send/customer-waiting"):
+            return {"ok": False, "status": 500, "json": {"ok": False, "error": {"message": "WAITING_FAILED"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            raise AssertionError("customer-waiting failure must still not call final ta-submit PUT")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001], "one_click_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "manual_required"
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["unfavorable_tax_difference_skip_count"] == 1
+    assert result["customer_waiting_failed_count"] == 1
+    assert result["results"][0]["custom_type"] == "마"
+    assert "WAITING_FAILED" in result["results"][0]["customer_waiting_error"]
+    assert not any(call["url"].endswith("/api/tax/v1/gitax/submit/3001/ta-submit") for call in calls)
 
 
 def test_submit_tax_reports_one_click_refund_in_progress_start_is_not_failure(monkeypatch, tmp_path):
@@ -2324,6 +2468,9 @@ def test_submit_tax_reports_one_click_refund_in_progress_start_is_not_failure(mo
             raise AssertionError("ESTIMATE calculationType must not call minus-amount correction during one-click prepare")
         if url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
             assert method == "PUT"
             return {"ok": False, "status": 400, "json": {"ok": False, "error": {"message": "환불이 진행중입니다."}}}
@@ -2392,6 +2539,9 @@ def test_submit_tax_reports_one_click_start_failure_logs_and_batch_continues(mon
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
             assert method == "PUT"
             return {"ok": False, "status": 500, "json": {"ok": False, "error": {"message": "TEST_START_FAILED"}}}
@@ -2449,6 +2599,9 @@ def test_submit_tax_reports_one_click_in_progress_is_recorded_and_moves_on(monke
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
             assert method == "PUT"
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
@@ -2540,6 +2693,9 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit/status"):
@@ -2629,6 +2785,9 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_without_max_limit_fetch
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit/status"):
@@ -2692,6 +2851,9 @@ def test_submit_tax_reports_one_click_none_auto_fetch_payload_zero_ignores_env_c
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit/status"):
@@ -2734,6 +2896,9 @@ def test_submit_tax_reports_one_click_submit_chunk_size_is_capped_to_20(monkeypa
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if "/api/tax/v1/gitax/submit/" in url and url.endswith("/ta-submit"):
             put_tax_doc_ids.append(int(url.split("/submit/")[1].split("/")[0]))
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
@@ -2783,6 +2948,9 @@ def test_submit_tax_reports_one_click_minus_amount_failure_sets_custom_type_ah_a
             return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
         if url.endswith("/api/tax/v1/gitax/submit/5002/submit-category"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/5002/ta-submit"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
         if url.endswith("/api/tax/v1/gitax/submit/5002/ta-submit/status"):
@@ -2838,6 +3006,9 @@ def test_submit_tax_reports_one_click_estimate_real_estate_code_still_submits_wi
         if url.endswith("/api/tax/v1/gitax/submit/5201/submit-category"):
             assert method == "GET"
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/5201/ta-submit"):
             assert method == "PUT"
             assert json_body == {"submitUserType": "APP_USER"}
@@ -2912,6 +3083,9 @@ def test_submit_tax_reports_one_click_blocks_submit_when_submit_category_marks_t
                     },
                 },
             }
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/5301/ta-submit"):
             raise AssertionError("submit-category blocked case must not call ta-submit")
         if url.endswith("/api/tax/v1/gitax/submit/5301/ta-submit/status"):
@@ -3082,6 +3256,9 @@ def test_submit_tax_reports_one_click_skips_reput_when_taxdoc_already_in_progres
         calls.append({"url": url, "method": method, "json_body": json_body})
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
             return {"ok": True, "status": 200, "json": {"ok": True, "data": {"status": "IN_PROGRESS"}}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
         if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
             raise AssertionError("must not re-put when taxdoc already in durable in-progress log")
         raise AssertionError(f"unexpected url: {url}")
