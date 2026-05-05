@@ -86,6 +86,7 @@ def _all_bots_action_form(
     confirm_message: str,
     hint: str | None = None,
     extra_controls: str = "",
+    confirm_attr_override: str | None = None,
 ) -> str:
     safe_action = escape(action, quote=True)
     safe_label = escape(label)
@@ -93,11 +94,11 @@ def _all_bots_action_form(
     hint_html = ""
     if hint:
         hint_html = f"<span class='hint'>{escape(hint)}</span>"
+    confirm_attr = confirm_attr_override or f"onclick=\"return confirm('{safe_confirm}')\""
     return (
         f"<form method='post' action='{safe_action}' class='inline-form' style='display:inline'>"
         f"{extra_controls}"
-        "<button type='submit' class='send' "
-        f"onclick=\"return confirm('{safe_confirm}')\">"
+        f"<button type='submit' class='send' {confirm_attr}>"
         f"{safe_label}</button>"
         f"{hint_html}"
         "</form>"
@@ -120,6 +121,15 @@ def _reporter_one_click_custom_type_filter_select() -> str:
         "style='min-width:88px;padding:4px 8px;font-size:14px'>"
         f"{options_html}"
         "</select></label>"
+    )
+
+
+def _reporter_one_click_custom_type_confirm_attr(message_prefix: str) -> str:
+    safe_prefix = escape(message_prefix, quote=True)
+    return (
+        "onclick=\"const selectedType=this.form.elements['tax_doc_custom_type_filter']"
+        "?this.form.elements['tax_doc_custom_type_filter'].value:'NONE';"
+        f"return confirm('{safe_prefix} 선택 유형=' + selectedType + ' 로 진행할까요?')\""
     )
 
 
@@ -154,8 +164,11 @@ def _global_bulk_actions_html() -> str:
                 action="/ui/commands/reporters/submit-tax-reports-one-click-all",
                 label="전체 자동조회 신고제출 실행",
                 confirm_message="reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉할까요?",
-                hint="SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출",
+                hint="SUBMIT_READY · 선택 유형(기본 NONE) · 검토 NORMAL 전체조회 후 5분 반복 신고제출",
                 extra_controls=_reporter_one_click_custom_type_filter_select(),
+                confirm_attr_override=_reporter_one_click_custom_type_confirm_attr(
+                    "reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉합니다."
+                ),
             ),
             _all_bots_action_form(
                 action="/ui/commands/reporters/stop-and-clear-active-all",
@@ -203,8 +216,7 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
     return (
         f"<form method='post' action='{action}' class='inline-form' style='display:inline'>"
         f"{_reporter_one_click_custom_type_filter_select()}"
-        "<button type='submit' class='send' "
-        "onclick=\"return confirm('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/선택 유형/검토 NORMAL 대상을 자동조회하고, 없으면 5분 대기 후 반복할까요?')\">"
+        f"<button type='submit' class='send' {_reporter_one_click_custom_type_confirm_attr('실제 최종 신고제출입니다. 입력칸 없이 SUBMIT_READY/검토 NORMAL 대상을 자동조회하고, 없으면 5분 대기 후 반복합니다.')}>"
         "자동조회 신고제출 실행</button>"
         "<span class='hint'>SUBMIT_READY · 선택 유형(기본 NONE) · 검토 NORMAL 전체조회 후 5분 반복 신고제출</span>"
         "</form>"
@@ -214,8 +226,7 @@ def _taxdoc_id_list_tax_report_one_click_submit_form(bot_id: str) -> str:
         f"{_reporter_one_click_custom_type_filter_select()}"
         "<textarea name='tax_doc_ids' rows='2' cols='24' "
         "placeholder='선택사항: 특정 taxDocId만 수동 신고제출(비우면 자동조회)'></textarea>"
-        "<button type='submit' class='send' "
-        "onclick=\"return confirm('입력한 taxDocId만 수동 신고제출합니다. 비어있으면 선택 유형으로 자동조회 모드 실행됩니다. 진행할까요?')\">"
+        f"<button type='submit' class='send' {_reporter_one_click_custom_type_confirm_attr('입력한 taxDocId만 수동 신고제출합니다. 비어있으면 자동조회 모드 실행됩니다.')}>"
         "수동 ID목록 신고제출</button>"
         "</form>"
         "</details>"

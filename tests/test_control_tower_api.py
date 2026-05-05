@@ -218,7 +218,8 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "수동 신고준비(고급)" in root.text
     assert "수동 신고준비(담당자 배정+음수항목 보정)만 순차 실행" in root.text
     assert "자동조회 신고제출 실행" in root.text
-    assert "입력칸 없이 SUBMIT_READY/선택 유형/검토 NORMAL 대상을 자동조회" in root.text
+    assert "입력칸 없이 SUBMIT_READY/검토 NORMAL 대상을 자동조회" in root.text
+    assert "선택 유형=' + selectedType" in root.text
     assert "SUBMIT_READY · 선택 유형(기본 NONE) · 검토 NORMAL 전체조회 후 5분 반복 신고제출" in root.text
     assert "전체 계산발송" in root.text
     assert "전체 단순경비율 목록발송" in root.text
