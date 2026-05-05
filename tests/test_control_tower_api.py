@@ -968,6 +968,95 @@ def test_stop_command_disables_sender_send_repeat_schedule(tmp_path):
     assert commands[0]["command"] == "stop"
 
 
+def test_stopped_sender_heartbeat_does_not_restore_old_progress_step(tmp_path):
+    client = build_client(tmp_path)
+    service = client.app.state.service
+
+    initial = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "WIN-PC-01",
+            "ip_address": "127.0.0.1",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "session_active",
+            "current_step": "계산발송 완료 9건 / 다음발송 120초 후",
+            "success_count": 3,
+            "failure_count": 0,
+        },
+    )
+    assert initial.status_code == 200
+
+    response = client.post(
+        "/ui/commands/senders/stop-and-clear-active-all",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    stop_command = polled.json()["commands"][0]
+    assert stop_command["command"] == "stop"
+    assert client.post(f"/api/commands/{stop_command['id']}/complete", json={"status": "done"}).status_code == 200
+
+    stopped = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "WIN-PC-01",
+            "ip_address": "127.0.0.1",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "stopped",
+            "current_step": "반복 중지",
+            "success_count": 3,
+            "failure_count": 0,
+        },
+    )
+    assert stopped.status_code == 200
+
+    stale = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "WIN-PC-01",
+            "ip_address": "127.0.0.1",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "session_active",
+            "current_step": "계산발송 완료 9건 / 다음발송 120초 후",
+            "success_count": 3,
+            "failure_count": 0,
+        },
+    )
+    assert stale.status_code == 200
+
+    bot = service.db.get_bot("sender-01")
+    assert bot["status"] == "stopped"
+    assert bot["current_step"] == "반복 중지"
+
+    start_response = client.post("/ui/bots/sender-01/commands/start", follow_redirects=False)
+    assert start_response.status_code == 303
+    resumed = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "WIN-PC-01",
+            "ip_address": "127.0.0.1",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "running",
+            "current_step": "running",
+            "success_count": 3,
+            "failure_count": 0,
+        },
+    )
+    assert resumed.status_code == 200
+    bot = service.db.get_bot("sender-01")
+    assert bot["status"] == "running"
+    assert bot["current_step"] == "running"
+
+
 def test_dashboard_sender_stop_and_clear_active_all_clears_pending_and_queues_stop(tmp_path):
     client = build_client(tmp_path)
     service = client.app.state.service

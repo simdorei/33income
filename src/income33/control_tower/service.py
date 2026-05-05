@@ -520,21 +520,46 @@ class ControlTowerService:
         )
         return _sanitize_command_for_response(done)
 
+    def _preserve_operator_stopped_state(
+        self,
+        payload: dict[str, Any],
+        previous_bot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not previous_bot or not payload.get("bot_id"):
+            return payload
+        if previous_bot.get("status") != "stopped":
+            return payload
+        if payload.get("bot_status") == "stopped":
+            return payload
+
+        preserved = dict(payload)
+        preserved["bot_status"] = "stopped"
+        preserved["current_step"] = previous_bot.get("current_step") or "stopped"
+        logger.info(
+            "heartbeat_preserved_operator_stopped_state bot_id=%s incoming_status=%s incoming_step=%s preserved_step=%s",
+            payload.get("bot_id"),
+            payload.get("bot_status"),
+            payload.get("current_step"),
+            preserved.get("current_step"),
+        )
+        return preserved
+
     def receive_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         previous_agent = self.db.get_agent(str(payload.get("pc_id"))) if payload.get("pc_id") else None
         previous_bot = self.db.get_bot(str(payload.get("bot_id"))) if payload.get("bot_id") else None
-        record = self.db.upsert_heartbeat(payload)
+        effective_payload = self._preserve_operator_stopped_state(payload, previous_bot)
+        record = self.db.upsert_heartbeat(effective_payload)
         self.status_mirror.notify_heartbeat(
-            payload,
+            effective_payload,
             previous_agent=previous_agent,
             previous_bot=previous_bot,
         )
         logger.info(
             "AGENT CONNECTED heartbeat_received pc_id=%s bot_id=%s bot_status=%s step=%s",
-            payload.get("pc_id"),
-            payload.get("bot_id"),
-            payload.get("bot_status"),
-            payload.get("current_step"),
+            effective_payload.get("pc_id"),
+            effective_payload.get("bot_id"),
+            effective_payload.get("bot_status"),
+            effective_payload.get("current_step"),
         )
         return record
 

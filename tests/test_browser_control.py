@@ -1499,7 +1499,10 @@ def test_submit_tax_reports_assigns_then_applies_minus_amount_corrections(monkey
     summary_lines = stale_summary_path.read_text(encoding="utf-8").splitlines()
     assert "taxDocId=10" not in "\n".join(summary_lines)
     assert "taxDocId=99" in summary_lines[0]
-    assert "taxDocId=11 | 음수항목 보정 실패 | status=500 | reason=temporary failure | customType=미설정" in summary_lines[1]
+    assert (
+        "taxDocId=11 | 음수항목 보정 실패 | status=500 | reason=temporary failure | "
+        "taxDocCustomTypeFilter=ALL | customType=미설정"
+    ) in summary_lines[1]
 
 
 def test_submit_tax_reports_skips_minus_amount_for_estimate_calculation_type(monkeypatch):
@@ -1861,7 +1864,8 @@ def test_submit_tax_reports_one_click_in_progress_is_recorded_and_moves_on(monke
     assert in_progress_lines[-1]["next_check_at"]
 
 
-def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_filters(monkeypatch):
+def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_filters(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="income33.agent.browser_control")
     calls = []
     fetched_pages = []
 
@@ -1877,7 +1881,7 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
             fetched_pages.append(int(query["page"][0]))
             assert query["officeId"] == ["327"]
             assert query["workflowFilterSet"] == ["SUBMIT_READY"]
-            assert query["taxDocCustomTypeFilter"] == ["NONE"]
+            assert query["taxDocCustomTypeFilter"] == ["가"]
             assert query["reviewTypeFilter"] == ["NORMAL"]
             assert query["sort"] == ["SUBMIT_REQUEST_DATE_TIME"]
             assert query["direction"] == ["ASC"]
@@ -1925,7 +1929,12 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
 
     result = browser_control.submit_tax_reports(
         bot_id="reporter-01",
-        payload={"one_click_submit": True, "one_click_fetch_page_size": 2, "max_auto_targets": 10},
+        payload={
+            "one_click_submit": True,
+            "one_click_fetch_page_size": 2,
+            "max_auto_targets": 10,
+            "tax_doc_custom_type_filter": "가",
+        },
     )
 
     assert result["ok"] is True
@@ -1935,6 +1944,17 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
     assert fetched_pages == [0, 1]
     assert result["one_click_fetch_page_size"] == 2
     assert result["auto_fetch_pages"] == [0, 1]
+
+    joined_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "tax_report_submit_start" in joined_logs
+    assert "tax_doc_custom_type_filter=가" in joined_logs
+    assert "tax_report_one_click_submit_category" in joined_logs
+    assert "submit_category=TA_ONECLICK" in joined_logs
+    in_progress_lines = [
+        browser_control.json.loads(line)
+        for line in (tmp_path / "tax_report_one_click_in_progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert {row["tax_doc_custom_type_filter"] for row in in_progress_lines} == {"가"}
 
 
 def test_submit_tax_reports_one_click_auto_fetch_targets_without_max_limit_fetches_all_pages(monkeypatch):

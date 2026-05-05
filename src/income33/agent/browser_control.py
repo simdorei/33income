@@ -961,12 +961,14 @@ def _write_tax_report_submit_failure_summary(entry: dict[str, Any]) -> Path:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     reason = _redact_sensitive_summary_text(str(entry.get("failure_reason") or ""))
     custom_type = entry.get("custom_type") or "미설정"
+    tax_doc_custom_type_filter = entry.get("tax_doc_custom_type_filter") or "미설정"
     line = (
         f"{entry.get('created_at')} | "
         f"taxDocId={entry.get('tax_doc_id')} | "
         f"{entry.get('stage_label')} 실패 | "
         f"status={entry.get('response_status')} | "
         f"reason={reason} | "
+        f"taxDocCustomTypeFilter={tax_doc_custom_type_filter} | "
         f"customType={custom_type} | "
         f"bot={entry.get('bot_id')} | "
         f"run={entry.get('run_id')}"
@@ -1023,7 +1025,14 @@ def _list_one_click_in_progress_tax_doc_ids() -> list[int]:
     return tax_doc_ids
 
 
-def _upsert_one_click_in_progress_record(*, tax_doc_id: int, run_id: str, final_status: str, poll_interval_sec: float) -> Path:
+def _upsert_one_click_in_progress_record(
+    *,
+    tax_doc_id: int,
+    run_id: str,
+    final_status: str,
+    poll_interval_sec: float,
+    tax_doc_custom_type_filter: str | None = None,
+) -> Path:
     log_path = _tax_report_one_click_in_progress_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
@@ -1038,15 +1047,16 @@ def _upsert_one_click_in_progress_record(*, tax_doc_id: int, run_id: str, final_
         if row_tax_doc_id == int(tax_doc_id):
             continue
         kept_rows.append(row)
-    kept_rows.append(
-        {
-            "tax_doc_id": int(tax_doc_id),
-            "run_id": str(run_id),
-            "final_status": str(final_status or "IN_PROGRESS"),
-            "last_checked_at": now.isoformat(),
-            "next_check_at": next_check_at.isoformat(),
-        }
-    )
+    record = {
+        "tax_doc_id": int(tax_doc_id),
+        "run_id": str(run_id),
+        "final_status": str(final_status or "IN_PROGRESS"),
+        "last_checked_at": now.isoformat(),
+        "next_check_at": next_check_at.isoformat(),
+    }
+    if tax_doc_custom_type_filter is not None:
+        record["tax_doc_custom_type_filter"] = str(tax_doc_custom_type_filter)
+    kept_rows.append(record)
     with log_path.open("w", encoding="utf-8") as handle:
         for row in kept_rows:
             handle.write(json.dumps(_redact_sensitive_log_values(row), ensure_ascii=False, sort_keys=True) + "\n")
@@ -1684,6 +1694,11 @@ def submit_tax_reports(
         _is_one_click_submit_mode(payload) or one_click_status_check_enabled
     )
     report_label = str(payload.get("report_label") or payload.get("reportLabel") or "국세신고")
+    tax_doc_custom_type_filter_for_log = str(
+        payload.get("tax_doc_custom_type_filter")
+        or payload.get("taxDocCustomTypeFilter")
+        or ("NONE" if one_click_submit_enabled else "ALL")
+    ).strip() or ("NONE" if one_click_submit_enabled else "ALL")
 
     api_base_url = _resolve_tax_api_base_url(payload)
     legacy_submit_enabled = not one_click_submit_enabled
@@ -1776,6 +1791,15 @@ def submit_tax_reports(
         or payload.get("runId")
         or f"{bot_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     )
+    logger.info(
+        "tax_report_submit_start bot_id=%s run_id=%s report_label=%s mode=%s tax_doc_custom_type_filter=%s requested_count=%s",
+        bot_id,
+        run_id,
+        report_label,
+        "one_click_status_check" if one_click_status_check_enabled else ("one_click_submit" if one_click_submit_enabled else "legacy_or_prepare"),
+        tax_doc_custom_type_filter_for_log,
+        len(tax_doc_ids),
+    )
 
     def _build_failure(
         *,
@@ -1811,6 +1835,7 @@ def submit_tax_reports(
             "run_id": run_id,
             "bot_id": bot_id,
             "report_label": report_label,
+            "tax_doc_custom_type_filter": tax_doc_custom_type_filter_for_log,
             "attempt_index": attempt_index,
             "tax_doc_id": int(tax_doc_id),
             "stage": stage,
@@ -2413,6 +2438,7 @@ def submit_tax_reports(
                     run_id=run_id,
                     final_status=final_status or "IN_PROGRESS",
                     poll_interval_sec=poll_interval_sec,
+                    tax_doc_custom_type_filter=tax_doc_custom_type_filter_for_log,
                 )
                 results.append(
                     {
@@ -2775,6 +2801,14 @@ def submit_tax_reports(
                     results.append({**failure, "status": "skipped", "submit_category": submit_category, "poll_count": 0})
                     continue
                 submit_category = _one_click_category_from_response(category_json)
+                logger.info(
+                    "tax_report_one_click_submit_category bot_id=%s run_id=%s tax_doc_id=%s tax_doc_custom_type_filter=%s submit_category=%s",
+                    bot_id,
+                    run_id,
+                    normalized_tax_doc_id,
+                    tax_doc_custom_type_filter_for_log,
+                    submit_category,
+                )
 
                 try:
                     start_response = _browser_fetch_json(
@@ -2810,6 +2844,7 @@ def submit_tax_reports(
                         run_id=run_id,
                         final_status="REFUND_IN_PROGRESS",
                         poll_interval_sec=poll_interval_sec,
+                        tax_doc_custom_type_filter=tax_doc_custom_type_filter_for_log,
                     )
                     results.append(
                         {
