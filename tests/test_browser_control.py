@@ -3136,8 +3136,7 @@ def test_submit_tax_reports_one_click_estimate_real_estate_code_still_submits_wi
         if url.endswith("/api/tax/v1/taxdocs/5201/custom-type"):
             raise AssertionError("ESTIMATE blocked industry code must not set customType 아")
         if url.endswith("/api/tax/v1/gitax/submit/5201/submit-category"):
-            assert method == "GET"
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+            raise AssertionError("ESTIMATE calculationType must submit before submit-category guard")
         if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
             assert method == "GET"
             return _one_click_summary_response()
