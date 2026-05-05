@@ -488,6 +488,19 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def get_active_command(self, *, bot_id: str, command: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM commands
+                WHERE bot_id = ? AND command = ? AND status IN ('pending', 'running')
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (bot_id, command),
+            ).fetchone()
+        return self._row_to_dict(row)
+
     def enqueue_command(
         self,
         pc_id: str,
@@ -530,30 +543,151 @@ class Database:
             row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
         return self._row_to_dict(row)  # type: ignore[arg-type]
 
+    def enqueue_command_unless_active_stop(
+        self,
+        pc_id: str,
+        bot_id: str,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = now_utc_iso()
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active_stop = conn.execute(
+                """
+                SELECT 1 FROM commands
+                WHERE bot_id = ? AND command = 'stop' AND status IN ('pending', 'running')
+                LIMIT 1
+                """,
+                (bot_id,),
+            ).fetchone()
+            if active_stop is not None:
+                raise ValueError("stop command pending for bot; refusing to queue workload command")
+
+            cursor = conn.execute(
+                """
+                INSERT INTO commands (
+                    pc_id, bot_id, command, status,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?)
+                """,
+                (pc_id, bot_id, command, payload_json, now),
+            )
+            command_id = cursor.lastrowid
+
+            mapped_state = {
+                "start": ("starting", "starting"),
+                "stop": ("stopped", "stopped"),
+                "restart": ("restarting", "restarting"),
+                "open_login": ("login_required", "login_required"),
+                "login_done": ("idle", "idle"),
+                "fill_login": ("login_filling", "login_filling"),
+                "submit_auth_code": ("manual_required", "auth_code_queued"),
+                "refresh_page": ("refreshing", "session_refresh"),
+            }.get(command)
+            if mapped_state is not None:
+                mapped_status, mapped_step = mapped_state
+                conn.execute(
+                    "UPDATE bots SET status = ?, current_step = ?, updated_at = ? WHERE bot_id = ?",
+                    (mapped_status, mapped_step, now, bot_id),
+                )
+
+            row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+        return self._row_to_dict(row)  # type: ignore[arg-type]
+
+    def enqueue_stop_command(
+        self,
+        pc_id: str,
+        bot_id: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        reason: str = "cleared_by_stop_command",
+    ) -> tuple[dict[str, Any], int, bool]:
+        now = now_utc_iso()
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cleared = conn.execute(
+                """
+                UPDATE commands
+                SET status = 'failed', finished_at = ?, error_message = ?
+                WHERE bot_id = ? AND status IN ('pending', 'running') AND command != 'stop'
+                """,
+                (now, reason, bot_id),
+            )
+            existing_stop = conn.execute(
+                """
+                SELECT * FROM commands
+                WHERE bot_id = ? AND command = 'stop' AND status IN ('pending', 'running')
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (bot_id,),
+            ).fetchone()
+            if existing_stop is not None:
+                return self._row_to_dict(existing_stop), int(cleared.rowcount or 0), True  # type: ignore[return-value]
+
+            cursor = conn.execute(
+                """
+                INSERT INTO commands (
+                    pc_id, bot_id, command, status,
+                    payload_json, created_at
+                ) VALUES (?, ?, 'stop', 'pending', ?, ?)
+                """,
+                (pc_id, bot_id, payload_json, now),
+            )
+            command_id = cursor.lastrowid
+            conn.execute(
+                "UPDATE bots SET status = ?, current_step = ?, updated_at = ? WHERE bot_id = ?",
+                ("stopped", "stopped", now, bot_id),
+            )
+            row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+        return self._row_to_dict(row), int(cleared.rowcount or 0), False  # type: ignore[return-value]
+
     def poll_commands(self, pc_id: str, limit: int = 10) -> list[dict[str, Any]]:
         now = now_utc_iso()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Operator stop is a control-plane interrupt.  Do not let an older
+            # workload command at the front of the FIFO delay it.
             rows = conn.execute(
                 """
                 SELECT * FROM commands
-                WHERE pc_id = ? AND status = 'pending'
+                WHERE pc_id = ? AND status = 'pending' AND command = 'stop'
                 ORDER BY id ASC
                 LIMIT ?
                 """,
                 (pc_id, limit),
             ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM commands
+                    WHERE pc_id = ? AND status = 'pending'
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (pc_id, limit),
+                ).fetchall()
 
             command_ids = [row["id"] for row in rows]
             if command_ids:
                 placeholders = ",".join("?" for _ in command_ids)
-                conn.execute(
-                    f"UPDATE commands SET status = 'running', picked_at = ? WHERE id IN ({placeholders})",
-                    (now, *command_ids),
-                )
-                refreshed = conn.execute(
-                    f"SELECT * FROM commands WHERE id IN ({placeholders}) ORDER BY id ASC",
-                    tuple(command_ids),
-                ).fetchall()
+                update_sql = f"""
+                    UPDATE commands
+                    SET status = 'running', picked_at = ?
+                    WHERE id IN ({placeholders}) AND status = 'pending'
+                """
+                conn.execute(update_sql, (now, *command_ids))
+                select_sql = f"""
+                    SELECT * FROM commands
+                    WHERE id IN ({placeholders}) AND status = 'running'
+                    ORDER BY id ASC
+                """
+                refreshed = conn.execute(select_sql, tuple(command_ids)).fetchall()
             else:
                 refreshed = []
 
@@ -567,11 +701,12 @@ class Database:
     ) -> dict[str, Any]:
         now = now_utc_iso()
         with self._connect() as conn:
-            conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
                 """
                 UPDATE commands
                 SET status = ?, finished_at = ?, error_message = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('pending', 'running')
                 """,
                 (status, now, error_message, command_id),
             )
@@ -581,6 +716,8 @@ class Database:
             ).fetchone()
             if command_row is None:
                 raise KeyError(f"command not found: {command_id}")
+            if not cursor.rowcount:
+                return self._row_to_dict(command_row)  # type: ignore[arg-type]
 
             bot_id = command_row["bot_id"]
             command = command_row["command"]
@@ -730,17 +867,29 @@ class Database:
 
         return self._row_to_dict(refreshed)  # type: ignore[arg-type]
 
-    def clear_active_commands(self, *, bot_id: str, reason: str = "cleared_by_operator") -> int:
+    def clear_active_commands(
+        self,
+        *,
+        bot_id: str,
+        reason: str = "cleared_by_operator",
+        exclude_commands: set[str] | None = None,
+    ) -> int:
         now = now_utc_iso()
+        params: list[Any] = [now, reason, bot_id]
+        exclude_clause = ""
+        if exclude_commands:
+            placeholders = ",".join("?" for _ in exclude_commands)
+            exclude_clause = f" AND command NOT IN ({placeholders})"
+            params.extend(sorted(exclude_commands))
+        sql = """
+            UPDATE commands
+            SET status = 'failed', finished_at = ?, error_message = ?
+            WHERE bot_id = ? AND status IN ('pending', 'running')
+        """
+        if exclude_clause:
+            sql += exclude_clause
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE commands
-                SET status = 'failed', finished_at = ?, error_message = ?
-                WHERE bot_id = ? AND status IN ('pending', 'running')
-                """,
-                (now, reason, bot_id),
-            )
+            cursor = conn.execute(sql, tuple(params))
         return int(cursor.rowcount or 0)
 
     def list_active_commands(self) -> list[dict[str, Any]]:
