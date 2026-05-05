@@ -1727,9 +1727,21 @@ def _one_click_error_message_from_response(response_json: Any) -> str | None:
     return None
 
 
+CALCULATION_TYPE_KEYS = {
+    "calculationType",
+    "calculation_type",
+    "taxCalculationType",
+    "tax_calculation_type",
+    "calculationMethod",
+    "calculation_method",
+    "계산방법",
+    "계산유형",
+}
+
+
 def _calculation_type_from_value(value: Any) -> str | None:
     if isinstance(value, dict):
-        for key in ("calculationType", "calculation_type"):
+        for key in CALCULATION_TYPE_KEYS:
             raw_calculation_type = value.get(key)
             if raw_calculation_type:
                 return str(raw_calculation_type).strip().upper()
@@ -1759,19 +1771,27 @@ def _strings_for_keys_from_value(value: Any, keys: set[str]) -> list[str]:
 
 
 def _is_estimate_or_simplified_expense_taxdoc(value: Any) -> bool:
-    calculation_types = _strings_for_keys_from_value(value, {"calculationType", "calculation_type"})
-    if any(raw.strip().upper() == "ESTIMATE" for raw in calculation_types):
-        return True
+    calculation_types = _strings_for_keys_from_value(value, CALCULATION_TYPE_KEYS)
+    for raw_calculation_type in calculation_types:
+        normalized = raw_calculation_type.strip().upper()
+        if normalized in {"ESTIMATE", "ESIMATE"} or "추계" in raw_calculation_type:
+            return True
 
     expense_rate_types = _strings_for_keys_from_value(
         value,
         {
             "applyExpenseRateType",
             "apply_expense_rate_type",
+            "applyExpenseRateName",
+            "apply_expense_rate_name",
             "expenseRateType",
             "expense_rate_type",
+            "expenseRateName",
+            "expense_rate_name",
             "경비율유형",
             "적용경비율유형",
+            "경비율",
+            "적용경비율",
         },
     )
     for raw_expense_rate_type in expense_rate_types:
@@ -3200,6 +3220,11 @@ def submit_tax_reports(
                     submit_category=None,
                     guard=customer_tax_guard,
                 )
+                continue
+
+            if _is_estimate_or_simplified_expense_taxdoc(summary_json):
+                estimate_or_simplified_expense_tax_doc_ids.add(normalized_tax_doc_id)
+                eligible_tax_doc_ids.append(normalized_tax_doc_id)
                 continue
 
             tax_doc_list_row = one_click_tax_doc_rows_by_id.get(normalized_tax_doc_id)

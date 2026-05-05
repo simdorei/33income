@@ -2324,6 +2324,67 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
     assert len([call for call in calls if call["url"].endswith("/ta-submit/status")]) == 1
 
 
+def test_submit_tax_reports_one_click_summary_estimate_submits_before_business_income_and_category(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert method == "PUT"
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [3001]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/3001/submits/summary"):
+            assert method == "GET"
+            response = _one_click_summary_response()
+            response["json"]["data"]["계산방법"] = "ESIMATE"
+            return response
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/3001/business-incomes"):
+            raise AssertionError("summary 계산방법이 ESTIMATE/ESIMATE이면 business-incomes 전에 신고후보가 되어야 함")
+        if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
+            raise AssertionError("summary 계산방법이 ESTIMATE/ESIMATE이면 submit-category 전에 ta-submit 해야 함")
+        if "/minus-amount/correction" in url:
+            raise AssertionError("summary 계산방법이 ESTIMATE/ESIMATE이면 음수보정 호출 금지")
+        if url.endswith("/api/tax/v1/taxdocs/3001/custom-type"):
+            raise AssertionError("summary 계산방법이 ESTIMATE/ESIMATE이면 아 분류 호출 금지")
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit"):
+            assert method == "PUT"
+            assert json_body == {"submitUserType": "APP_USER"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/3001/ta-submit/status"):
+            assert method == "GET"
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"submitUserType": "APP_USER", "status": "SUCCESS", "errorMessage": None}},
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"tax_doc_ids": [3001], "one_click_submit": True, "poll_interval_sec": 0, "poll_timeout_sec": 1},
+    )
+
+    assert result["ok"] is True
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["skipped_count"] == 0
+    assert result["eligible_tax_doc_ids"] == [3001]
+    assert result["results"][0]["submit_category"] == "ESTIMATE_OR_SIMPLIFIED_EXPENSE_RATE"
+    assert result["results"][0]["status"] == "completed"
+    summary_index = next(i for i, call in enumerate(calls) if call["url"].endswith("/submits/summary"))
+    submit_index = next(i for i, call in enumerate(calls) if call["url"].endswith("/ta-submit"))
+    assert summary_index < submit_index
+    assert not any(call["url"].endswith("/business-incomes") for call in calls)
+    assert not any(call["url"].endswith("/submit-category") for call in calls)
+
 def test_submit_tax_reports_one_click_blocks_unfavorable_customer_tax_difference(monkeypatch):
     calls = []
 
