@@ -23,7 +23,7 @@ REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS = frozenset(
 
 
 def _normalize_reporter_one_click_custom_type_filter(raw_value: str) -> str:
-    custom_type_filter = (raw_value or "").strip() or "ALL"
+    custom_type_filter = (raw_value or "").strip() or "NONE"
     if custom_type_filter not in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS:
         raise HTTPException(
             status_code=400,
@@ -181,11 +181,13 @@ def register_bot_command_routes(app: FastAPI) -> None:
 
     @app.post("/ui/commands/reporters/submit-tax-reports-one-click-all")
     async def queue_reporter_all_submit_tax_reports_one_click(request: Request) -> RedirectResponse:
-        _normalize_reporter_one_click_custom_type_filter(
+        custom_type_filter = _normalize_reporter_one_click_custom_type_filter(
             await read_form_value(request, "tax_doc_custom_type_filter")
         )
         try:
-            results = app.state.service.start_reporter_one_click_submit_repeat()
+            results = app.state.service.start_reporter_one_click_submit_repeat(
+                custom_type_filter=custom_type_filter
+            )
         except ValueError as exc:
             logger.warning("queue_reporter_all_submit_tax_reports_one_click_rejected reason=%s", exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -197,6 +199,38 @@ def register_bot_command_routes(app: FastAPI) -> None:
             sum(1 for result in results if result.get("command") is not None),
         )
         return RedirectResponse(url="/", status_code=303)
+
+    def _stop_and_clear_active_all(*, bot_type: str, log_label: str) -> RedirectResponse:
+        try:
+            results = app.state.service.stop_and_clear_active_for_cohort(bot_type=bot_type)
+        except ValueError as exc:
+            logger.warning("%s_rejected reason=%s", log_label, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not results:
+            logger.warning("%s_no_targets bot_type=%s", log_label, bot_type)
+            raise HTTPException(status_code=404, detail=f"no bots found for type={bot_type}")
+        logger.info(
+            "%s_done bot_type=%s cleared_count=%s queued_stop_count=%s",
+            log_label,
+            bot_type,
+            sum(int(result.get("cleared_count") or 0) for result in results),
+            len(results),
+        )
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/ui/commands/senders/stop-and-clear-active-all")
+    def queue_sender_stop_and_clear_active_all() -> RedirectResponse:
+        return _stop_and_clear_active_all(
+            bot_type="sender",
+            log_label="queue_sender_stop_and_clear_active_all",
+        )
+
+    @app.post("/ui/commands/reporters/stop-and-clear-active-all")
+    def queue_reporter_stop_and_clear_active_all() -> RedirectResponse:
+        return _stop_and_clear_active_all(
+            bot_type="reporter",
+            log_label="queue_reporter_stop_and_clear_active_all",
+        )
 
     @app.post("/ui/bots/{bot_id}/rate-based-bookkeeping-send-list")
     async def queue_rate_based_bookkeeping_send_list(bot_id: str, request: Request) -> RedirectResponse:

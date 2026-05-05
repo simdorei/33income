@@ -730,6 +730,30 @@ class Database:
 
         return self._row_to_dict(refreshed)  # type: ignore[arg-type]
 
+    def clear_active_commands(self, *, bot_id: str, reason: str = "cleared_by_operator") -> int:
+        now = now_utc_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE commands
+                SET status = 'failed', finished_at = ?, error_message = ?
+                WHERE bot_id = ? AND status IN ('pending', 'running')
+                """,
+                (now, reason, bot_id),
+            )
+        return int(cursor.rowcount or 0)
+
+    def list_active_commands(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM commands
+                WHERE status IN ('pending', 'running')
+                ORDER BY bot_id ASC, id ASC
+                """
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

@@ -105,7 +105,20 @@ def _all_bots_action_form(
 
 
 def _reporter_one_click_custom_type_filter_select() -> str:
-    return ""
+    options_html = "".join(
+        (
+            f"<option value='{escape(option, quote=True)}' selected>{escape(option)}</option>"
+            if option == "NONE"
+            else f"<option value='{escape(option, quote=True)}'>{escape(option)}</option>"
+        )
+        for option in REPORTER_ONE_CLICK_CUSTOM_TYPE_FILTER_OPTIONS
+    )
+    return (
+        "<label style='margin-right:6px'>자동조회 신고제출 유형 "
+        "<select name='tax_doc_custom_type_filter'>"
+        f"{options_html}"
+        "</select></label>"
+    )
 
 
 def _global_bulk_actions_html() -> str:
@@ -130,11 +143,23 @@ def _global_bulk_actions_html() -> str:
                 hint=rate_based_bookkeeping_auto_hint(),
             ),
             _all_bots_action_form(
+                action="/ui/commands/senders/stop-and-clear-active-all",
+                label="sender 전체 중지+활성명령초기화",
+                confirm_message="sender 전체(01~09) 활성명령을 실패처리하고 stop을 큐잉할까요?",
+                hint="sender 01~09 stop + active clear",
+            ),
+            _all_bots_action_form(
                 action="/ui/commands/reporters/submit-tax-reports-one-click-all",
                 label="전체 자동조회 신고제출 실행",
                 confirm_message="reporter 전체(01~09)에 자동조회 신고제출 실행을 큐잉할까요?",
                 hint="SUBMIT_READY · 유형 NONE · 검토 NORMAL 전체조회 후 5분 반복 신고제출",
                 extra_controls=_reporter_one_click_custom_type_filter_select(),
+            ),
+            _all_bots_action_form(
+                action="/ui/commands/reporters/stop-and-clear-active-all",
+                label="reporter 전체 중지+활성명령초기화",
+                confirm_message="reporter 전체(01~09) 활성명령을 실패처리하고 stop을 큐잉할까요?",
+                hint="reporter 01~09 stop + active clear",
             ),
         ]
     )
@@ -322,6 +347,7 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
         "pc_id",
         "status",
         "current_step",
+        "active_command",
         "last_heartbeat_at",
         "success_count",
         "failure_count",

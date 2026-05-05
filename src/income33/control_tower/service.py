@@ -14,13 +14,12 @@ from income33.utils.time import to_utc_iso, utc_now
 
 logger = logging.getLogger("income33.control_tower.service")
 
-REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER = "NONE"
+REPORTER_ONE_CLICK_DEFAULT_CUSTOM_TYPE_FILTER = "NONE"
 REPORTER_ONE_CLICK_REPEAT_INTERVAL_SECONDS = 300
 REPORTER_ONE_CLICK_COMMAND = "submit_tax_reports"
 
 
-def reporter_one_click_submit_payload() -> dict[str, Any]:
-    custom_type_filter = REPORTER_ONE_CLICK_FORCED_CUSTOM_TYPE_FILTER
+def reporter_one_click_submit_payload(custom_type_filter: str = REPORTER_ONE_CLICK_DEFAULT_CUSTOM_TYPE_FILTER) -> dict[str, Any]:
     return {
         "tax_doc_ids": [],
         "one_click_submit": True,
@@ -264,6 +263,27 @@ class ControlTowerService:
     def list_bots(self, bot_type: str | None = None) -> list[dict[str, Any]]:
         return self.db.list_bots(bot_type=bot_type)
 
+    def stop_and_clear_active_for_cohort(self, *, bot_type: str) -> list[dict[str, Any]]:
+        bots = sorted(
+            self.list_bots(bot_type=bot_type),
+            key=lambda row: str(row.get("bot_id") or ""),
+        )
+        results: list[dict[str, Any]] = []
+        for bot in bots:
+            bot_id = str(bot.get("bot_id") or "")
+            if not bot_id:
+                continue
+            cleared_count = self.db.clear_active_commands(bot_id=bot_id, reason="cleared_by_operator")
+            queued_stop = self.queue_bot_command(bot_id=bot_id, command="stop", payload={})
+            results.append(
+                {
+                    "bot_id": bot_id,
+                    "cleared_count": cleared_count,
+                    "queued_stop_command_id": queued_stop.get("id"),
+                }
+            )
+        return results
+
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.db.list_recent_commands(limit=limit)
 
@@ -287,6 +307,7 @@ class ControlTowerService:
         self,
         bot_id: str | None = None,
         *,
+        custom_type_filter: str = REPORTER_ONE_CLICK_DEFAULT_CUSTOM_TYPE_FILTER,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         now_dt = _coerce_utc_datetime(now)
@@ -308,7 +329,7 @@ class ControlTowerService:
         results: list[dict[str, Any]] = []
         for bot in bots:
             target_bot_id = str(bot["bot_id"])
-            payload = reporter_one_click_submit_payload()
+            payload = reporter_one_click_submit_payload(custom_type_filter=custom_type_filter)
             schedule = self.db.upsert_repeat_schedule(
                 bot_id=target_bot_id,
                 pc_id=str(bot["pc_id"]),
@@ -518,9 +539,22 @@ class ControlTowerService:
         return record
 
     def build_dashboard(self) -> dict[str, Any]:
+        bots = [dict(bot) for bot in self.list_bots()]
+        active_by_bot: dict[str, list[str]] = {}
+        for command in self.db.list_active_commands():
+            bot_id = str(command.get("bot_id") or "")
+            if not bot_id:
+                continue
+            label = f"{command.get('command')}[{command.get('status')}]#{command.get('id')}"
+            active_by_bot.setdefault(bot_id, []).append(label)
+
+        for bot in bots:
+            bot_id = str(bot.get("bot_id") or "")
+            bot["active_command"] = ", ".join(active_by_bot.get(bot_id, []))
+
         return {
             "summary": self.get_summary(),
             "agents": self.list_agents(),
-            "bots": self.list_bots(),
+            "bots": bots,
             "commands": self.list_recent_commands(limit=20),
         }

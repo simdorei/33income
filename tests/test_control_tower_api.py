@@ -10,6 +10,7 @@ from income33.control_tower.service import (
     command_policies,
     dashboard_allowed_commands,
     get_command_policy,
+    reporter_one_click_submit_payload,
     resolve_retry_interval_seconds,
     resolve_retry_max_attempts,
     sender_only_commands,
@@ -223,13 +224,16 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "전체 단순경비율 목록발송" in root.text
     assert "전체 경비율 장부발송" in root.text
     assert "전체 자동조회 신고제출 실행" in root.text
-    assert "자동조회 신고제출 유형" not in root.text
-    assert "name='tax_doc_custom_type_filter'" not in root.text
-    assert "value='ALL' selected" not in root.text
-    assert "value='NONE'" not in root.text
-    assert "value='아'" not in root.text
+    assert "자동조회 신고제출 유형" in root.text
+    assert "name='tax_doc_custom_type_filter'" in root.text
+    assert "value='ALL'" in root.text
+    assert "value='NONE' selected" in root.text
+    assert "value='아'" in root.text
     assert "/ui/commands/senders/send-expected-tax-amounts-all" in root.text
     assert "/ui/commands/senders/send-simple-expense-rate-expected-tax-amounts-all" in root.text
+    assert "/ui/commands/senders/stop-and-clear-active-all" in root.text
+    assert "/ui/commands/reporters/stop-and-clear-active-all" in root.text
+
     assert "/ui/commands/senders/send-rate-based-bookkeeping-expected-tax-amounts-all" in root.text
     assert "/ui/commands/reporters/submit-tax-reports-one-click-all" in root.text
     assert "고급: 수동 taxDocId 지정" in root.text
@@ -244,6 +248,21 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "/ui/bots/sender-01/tax-report-one-click-submit-list" not in root.text
     assert "/ui/bots/reporter-01/commands/send_expected_tax_amounts" not in root.text
     assert "/ui/bots/reporter-01/commands/send_rate_based_bookkeeping_expected_tax_amounts" not in root.text
+
+
+def test_dashboard_shows_active_command_per_bot_row(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert f"send_expected_tax_amounts[pending]#{command_id}" in root.text
 
 
 def test_heartbeat_persists_agent_repo_version_fields_and_dashboard_shows_status(tmp_path):
@@ -634,7 +653,7 @@ def test_reporter_one_click_repeat_is_stored_in_control_tower_and_queues_initial
         assert payload["direction"] == "ASC"
 
 
-def test_dashboard_reporter_all_one_click_submit_forces_none_even_with_selected_custom_type(tmp_path):
+def test_dashboard_reporter_all_one_click_submit_applies_selected_custom_type(tmp_path):
     client = build_client(tmp_path)
 
     response = client.post(
@@ -651,10 +670,10 @@ def test_dashboard_reporter_all_one_click_submit_forces_none_even_with_selected_
         assert len(commands) == 1
         assert commands[0]["command"] == "submit_tax_reports"
         payload_json = commands[0]["payload_json"]
-        assert '"tax_doc_custom_type_filter": "NONE"' in payload_json
-        assert '"taxDocCustomTypeFilter": "NONE"' in payload_json
-        assert '"tax_doc_custom_type_filter": "아"' not in payload_json
-        assert '"taxDocCustomTypeFilter": "아"' not in payload_json
+        assert '"tax_doc_custom_type_filter": "아"' in payload_json
+        assert '"taxDocCustomTypeFilter": "아"' in payload_json
+        assert '"tax_doc_custom_type_filter": "NONE"' not in payload_json
+        assert '"taxDocCustomTypeFilter": "NONE"' not in payload_json
         assert '"workflow_filter_set": "SUBMIT_READY"' in payload_json
         assert '"review_type_filter": "NORMAL"' in payload_json
 
@@ -947,6 +966,90 @@ def test_stop_command_disables_sender_send_repeat_schedule(tmp_path):
     commands = polled.json()["commands"]
     assert len(commands) == 1
     assert commands[0]["command"] == "stop"
+
+
+def test_dashboard_sender_stop_and_clear_active_all_clears_pending_and_queues_stop(tmp_path):
+    client = build_client(tmp_path)
+    service = client.app.state.service
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    pending_command_id = queued.json()["id"]
+
+    service.db.upsert_repeat_schedule(
+        bot_id="sender-01",
+        pc_id="pc-01",
+        command="send_expected_tax_amounts",
+        payload={"year": 2025},
+        interval_sec=300,
+        next_run_at="2099-01-01T00:00:00Z",
+    )
+
+    response = client.post(
+        "/ui/commands/senders/stop-and-clear-active-all",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert [command["command"] for command in commands] == ["stop"]
+
+    pending_command = next(
+        command for command in service.db.list_recent_commands(limit=200) if command["id"] == pending_command_id
+    )
+    assert pending_command["status"] == "failed"
+    assert pending_command["error_message"] == "cleared_by_operator"
+
+    schedules = _repeat_schedules(client, bot_id="sender-01", command="send_expected_tax_amounts")
+    assert len(schedules) == 1
+    assert schedules[0]["enabled"] == 0
+
+
+def test_dashboard_reporter_stop_and_clear_active_all_clears_pending_and_queues_stop(tmp_path):
+    client = build_client(tmp_path)
+    service = client.app.state.service
+
+    queued = client.post(
+        "/api/bots/reporter-01/commands",
+        json={"command": "submit_tax_reports", "payload": {"tax_doc_ids": [2001], "prepare_only": True}},
+    )
+    assert queued.status_code == 200
+    pending_command_id = queued.json()["id"]
+
+    service.db.upsert_repeat_schedule(
+        bot_id="reporter-01",
+        pc_id="pc-10",
+        command="submit_tax_reports",
+        payload=reporter_one_click_submit_payload(),
+        interval_sec=300,
+        next_run_at="2099-01-01T00:00:00Z",
+    )
+
+    response = client.post(
+        "/ui/commands/reporters/stop-and-clear-active-all",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    polled = client.get("/api/agents/pc-10/commands/poll")
+    assert polled.status_code == 200
+    commands = polled.json()["commands"]
+    assert [command["command"] for command in commands] == ["stop"]
+
+    pending_command = next(
+        command for command in service.db.list_recent_commands(limit=200) if command["id"] == pending_command_id
+    )
+    assert pending_command["status"] == "failed"
+    assert pending_command["error_message"] == "cleared_by_operator"
+
+    schedules = _repeat_schedules(client, bot_id="reporter-01", command="submit_tax_reports")
+    assert len(schedules) == 1
+    assert schedules[0]["enabled"] == 0
 
 
 def test_dashboard_can_queue_report_one_click_status_check_without_taxdoc_ids(tmp_path):
