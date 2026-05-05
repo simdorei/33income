@@ -2281,8 +2281,7 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
             "x-web-path": "https://newta.3o3.co.kr/git/submit",
         }
         if url.endswith("/api/tax/v1/gitax/submit/3001/submit-category"):
-            assert method == "GET"
-            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+            raise AssertionError("SIMPLIFIED_EXPENSE_RATE taxdoc must go directly to ta-submit after tax guard")
         if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
             assert method == "GET"
             return _one_click_summary_response()
@@ -2317,7 +2316,7 @@ def test_submit_tax_reports_one_click_polls_until_success_without_second_start(m
     assert result["in_progress_count"] == 1
     assert result["failed_count"] == 0
     assert result["current_step"].startswith("신고제출 완료 성공=0건 진행중=1건")
-    assert result["results"][0]["submit_category"] == "TA_ONECLICK"
+    assert result["results"][0]["submit_category"] == "ESTIMATE_OR_SIMPLIFIED_EXPENSE_RATE"
     assert result["results"][0]["status"] == "in_progress"
     assert result["results"][0]["final_status"] == "IN_PROGRESS"
     assert result["results"][0]["poll_count"] == 1
@@ -3115,8 +3114,8 @@ def test_submit_tax_reports_one_click_blocks_submit_when_submit_category_marks_t
                 "json": {
                     "ok": True,
                     "data": {
-                        "calculationType": "ESTIMATE",
-                        "summary": {"itemList": [{"사업자번호": "123-45-67890", "업종코드": "701101"}]},
+                        "calculationType": "BOOKKEEPING",
+                        "summary": {"itemList": []},
                     },
                 },
             }
