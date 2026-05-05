@@ -4335,10 +4335,120 @@ def send_bookkeeping_expected_tax_amount(
         payload.get("mark_custom_type_da_on_negative_additional_expense")
         or payload.get("markCustomTypeDaOnNegativeAdditionalExpense")
     )
+    raw_calculation_retry_count = payload.get("bookkeeping_calculation_retry_count")
+    if raw_calculation_retry_count is None:
+        raw_calculation_retry_count = payload.get("bookkeepingCalculationRetryCount")
+    if raw_calculation_retry_count is None:
+        raw_calculation_retry_count = _env_int("INCOME33_BOOKKEEPING_CALCULATION_RETRY_COUNT", 1)
+    bookkeeping_calculation_retry_count = max(0, int(raw_calculation_retry_count))
+
+    raw_calculation_retry_delay_seconds = payload.get("bookkeeping_calculation_retry_delay_seconds")
+    if raw_calculation_retry_delay_seconds is None:
+        raw_calculation_retry_delay_seconds = payload.get("bookkeepingCalculationRetryDelaySeconds")
+    if raw_calculation_retry_delay_seconds is None:
+        raw_calculation_retry_delay_seconds = _env_float("INCOME33_BOOKKEEPING_CALCULATION_RETRY_DELAY_SECONDS", 1.0)
+    bookkeeping_calculation_retry_delay_seconds = max(0.0, float(raw_calculation_retry_delay_seconds))
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
             page.goto(calculation_web_path, wait_until="domcontentloaded")
+
+        def _sleep_before_bookkeeping_calculation_retry() -> None:
+            if bookkeeping_calculation_retry_delay_seconds > 0:
+                time.sleep(bookkeeping_calculation_retry_delay_seconds)
+
+        def _fetch_bookkeeping_calculation_data(
+            *,
+            url: str,
+            stage: str,
+            expected_additional_expense_amount: int | None,
+            require_send_fields: bool,
+        ) -> dict[str, Any]:
+            attempts = bookkeeping_calculation_retry_count + 1
+            last_response: dict[str, Any] = {}
+            last_error: str | None = None
+            last_applied_additional_expense_amount: int | None = None
+            for attempt in range(1, attempts + 1):
+                response = _browser_fetch_json(page, url=url, headers=calculation_headers)
+                last_response = response
+                response_json = response.get("json") or {}
+                data = response_json.get("data") if isinstance(response_json, dict) else None
+                should_retry = False
+                retry_reason = ""
+
+                if not response.get("ok") or not (isinstance(response_json, dict) and response_json.get("ok")):
+                    fetch_error = response.get("fetch_error")
+                    last_error = f"status={response.get('status')}" + (f" fetch_error={fetch_error}" if fetch_error else "")
+                    should_retry = _is_retryable_report_transport_response(response) or response.get("ok") is True
+                    retry_reason = "transport"
+                elif not isinstance(data, dict):
+                    last_error = "calculation_data_missing"
+                    should_retry = True
+                    retry_reason = "data_missing"
+                else:
+                    if expected_additional_expense_amount is not None:
+                        raw_applied_additional_expense_amount = data.get("사업소득_추가_경비_인정액")
+                        if raw_applied_additional_expense_amount is None and require_send_fields:
+                            last_error = "missing 사업소득_추가_경비_인정액"
+                            should_retry = True
+                            retry_reason = "additional_expense_missing"
+                        elif raw_applied_additional_expense_amount is not None:
+                            last_applied_additional_expense_amount = _required_int_field(
+                                data,
+                                "사업소득_추가_경비_인정액",
+                                label="사업소득_추가_경비_인정액",
+                            )
+                            if last_applied_additional_expense_amount != expected_additional_expense_amount:
+                                last_error = (
+                                    "additional expense mismatch "
+                                    f"expected={expected_additional_expense_amount} "
+                                    f"actual={last_applied_additional_expense_amount}"
+                                )
+                                should_retry = True
+                                retry_reason = "additional_expense_mismatch"
+                    if not should_retry and require_send_fields:
+                        for field_name in ("종합소득세_납부_할_세액", "지방소득세_납부_할_세액", "권장수수료"):
+                            try:
+                                _required_int_field(data, field_name, label=field_name)
+                            except Exception as exc:
+                                last_error = str(exc)
+                                should_retry = True
+                                retry_reason = "send_field_missing"
+                                break
+                    if not should_retry:
+                        return data
+
+                if attempt < attempts and should_retry:
+                    logger.warning(
+                        "bookkeeping_calculation_retry stage=%s tax_doc_id=%s attempt=%s/%s reason=%s status=%s fetch_error=%s error=%s",
+                        stage,
+                        tax_doc_id,
+                        attempt,
+                        attempts - 1,
+                        retry_reason,
+                        response.get("status"),
+                        response.get("fetch_error"),
+                        last_error,
+                    )
+                    _sleep_before_bookkeeping_calculation_retry()
+                    continue
+
+                if (
+                    require_send_fields
+                    and expected_additional_expense_amount is not None
+                    and last_applied_additional_expense_amount is not None
+                    and last_applied_additional_expense_amount != expected_additional_expense_amount
+                ):
+                    raise RuntimeError(
+                        "bookkeeping final calculation additional expense mismatch "
+                        f"expected={expected_additional_expense_amount} actual={last_applied_additional_expense_amount}"
+                    )
+                failure_detail = last_error or f"status={last_response.get('status')}"
+                if stage == "base":
+                    raise RuntimeError(f"bookkeeping base calculation failed {failure_detail}")
+                raise RuntimeError(f"bookkeeping final calculation failed {failure_detail}")
+
+            raise RuntimeError(f"bookkeeping {stage} calculation failed")
 
         base_calculation_url = _bookkeeping_calculation_url(
             api_base_url=api_base_url,
@@ -4346,11 +4456,12 @@ def send_bookkeeping_expected_tax_amount(
             submit_account_type=submit_account_type,
             additional_expense_amount=0,
         )
-        base_response = _browser_fetch_json(page, url=base_calculation_url, headers=calculation_headers)
-        base_json = base_response.get("json") or {}
-        if not base_response.get("ok") or not base_json.get("ok"):
-            raise RuntimeError(f"bookkeeping base calculation failed status={base_response.get('status')}")
-        base_data = base_json.get("data") or {}
+        base_data = _fetch_bookkeeping_calculation_data(
+            url=base_calculation_url,
+            stage="base",
+            expected_additional_expense_amount=0,
+            require_send_fields=False,
+        )
         base_business_expense_amount = _required_int_field(
             base_data,
             "사업소득_필요_경비",
@@ -4404,37 +4515,12 @@ def send_bookkeeping_expected_tax_amount(
             submit_account_type=submit_account_type,
             additional_expense_amount=additional_expense_amount,
         )
-        final_calculation_attempt_count = 2
-        final_data: dict[str, Any] = {}
-        applied_additional_expense_amount: int | None = None
-        for final_calculation_attempt in range(1, final_calculation_attempt_count + 1):
-            final_response = _browser_fetch_json(page, url=final_calculation_url, headers=calculation_headers)
-            final_json = final_response.get("json") or {}
-            if not final_response.get("ok") or not final_json.get("ok"):
-                raise RuntimeError(f"bookkeeping final calculation failed status={final_response.get('status')}")
-            final_data = final_json.get("data") or {}
-            applied_additional_expense_amount = _required_int_field(
-                final_data,
-                "사업소득_추가_경비_인정액",
-                label="사업소득_추가_경비_인정액",
-            )
-            if applied_additional_expense_amount == additional_expense_amount:
-                break
-            if final_calculation_attempt < final_calculation_attempt_count:
-                logger.warning(
-                    "bookkeeping final calculation additional expense mismatch retrying "
-                    "tax_doc_id=%s expected=%s actual=%s attempt=%s/%s",
-                    tax_doc_id,
-                    additional_expense_amount,
-                    applied_additional_expense_amount,
-                    final_calculation_attempt,
-                    final_calculation_attempt_count,
-                )
-                continue
-            raise RuntimeError(
-                "bookkeeping final calculation additional expense mismatch "
-                f"expected={additional_expense_amount} actual={applied_additional_expense_amount}"
-            )
+        final_data = _fetch_bookkeeping_calculation_data(
+            url=final_calculation_url,
+            stage="final",
+            expected_additional_expense_amount=additional_expense_amount,
+            require_send_fields=True,
+        )
         expected_tax_amount = _required_int_field(
             final_data,
             "종합소득세_납부_할_세액",

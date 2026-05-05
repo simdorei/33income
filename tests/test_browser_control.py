@@ -1058,6 +1058,243 @@ def test_send_bookkeeping_expected_tax_amount_aborts_when_final_calculation_retr
     assert [call["method"] for call in calls] == ["GET", "GET", "GET"]
 
 
+def test_send_bookkeeping_expected_tax_amount_retries_base_calculation_transport_failure_then_posts_once(monkeypatch):
+    calls = []
+    base_attempts = 0
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        nonlocal base_attempts
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body["추가_경비_인정액"] == 27_543_987
+            assert json_body["expectedTaxAmount"] == -621_639
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            base_attempts += 1
+            if base_attempts == 1:
+                return {"ok": False, "status": 503, "json": None, "text": "temporary", "fetch_error": None}
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"사업소득_필요_경비": 13_994_157, "사업소득_추가_경비_인정액": 0},
+                    "error": None,
+                },
+            }
+        assert additional_expense_amount == 27_543_987
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "사업소득_추가_경비_인정액": 27_543_987,
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                },
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+    monkeypatch.setattr(browser_control.time, "sleep", lambda seconds: None)
+
+    result = browser_control.send_bookkeeping_expected_tax_amount(
+        bot_id="sender-01",
+        payload={
+            "tax_doc_id": 1345836,
+            "submit_account_type": "CUSTOMER",
+            "total_business_expense_amount": 41_538_144,
+            "bookkeeping_calculation_retry_delay_seconds": 0,
+        },
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "POST"]
+    assert base_attempts == 2
+    assert result["additional_expense_amount"] == 27_543_987
+
+
+def test_send_bookkeeping_expected_tax_amount_retries_final_calculation_transport_failure_then_posts_once(monkeypatch):
+    calls = []
+    final_attempts = 0
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        nonlocal final_attempts
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body["expectedTaxAmount"] == -621_639
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 13_994_157}, "error": None},
+            }
+        final_attempts += 1
+        if final_attempts == 1:
+            return {"ok": False, "status": 504, "json": None, "text": "gateway timeout", "fetch_error": None}
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "사업소득_추가_경비_인정액": 27_543_987,
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                },
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+    monkeypatch.setattr(browser_control.time, "sleep", lambda seconds: None)
+
+    result = browser_control.send_bookkeeping_expected_tax_amount(
+        bot_id="sender-01",
+        payload={
+            "tax_doc_id": 1345836,
+            "submit_account_type": "CUSTOMER",
+            "total_business_expense_amount": 41_538_144,
+            "bookkeeping_calculation_retry_delay_seconds": 0,
+        },
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "POST"]
+    assert final_attempts == 2
+    assert result["expected_tax_amount"] == -621_639
+
+
+def test_send_bookkeeping_expected_tax_amount_retries_until_final_tax_fields_materialize(monkeypatch):
+    calls = []
+    final_attempts = 0
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        nonlocal final_attempts
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            assert method == "POST"
+            assert json_body["expectedTaxAmount"] == -621_639
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"result": True}, "error": None}}
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 13_994_157}, "error": None},
+            }
+        final_attempts += 1
+        data = {
+            "사업소득_추가_경비_인정액": 27_543_987,
+        }
+        if final_attempts == 2:
+            data.update(
+                {
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                }
+            )
+        return {"ok": True, "status": 200, "json": {"ok": True, "data": data, "error": None}}
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+    monkeypatch.setattr(browser_control.time, "sleep", lambda seconds: None)
+
+    result = browser_control.send_bookkeeping_expected_tax_amount(
+        bot_id="sender-01",
+        payload={
+            "tax_doc_id": 1345836,
+            "submit_account_type": "CUSTOMER",
+            "total_business_expense_amount": 41_538_144,
+            "bookkeeping_calculation_retry_delay_seconds": 0,
+        },
+    )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "GET", "POST"]
+    assert final_attempts == 2
+    assert result["expected_tax_amount"] == -621_639
+
+
+def test_send_bookkeeping_expected_tax_amount_does_not_retry_send_post_on_transient_failure(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/tax/v1/taxdocs/1345836/expected-tax-amount/send"):
+            assert method == "POST"
+            return {"ok": False, "status": 503, "json": None, "text": "temporary", "fetch_error": None}
+
+        assert "/api/tax/v1/taxdocs/1345836/expected-tax-amount/calculation/bookkeeping" in url
+        query = parse_qs(urlparse(url).query)
+        additional_expense_amount = int(query["additionalExpenseAmount"][0])
+        if additional_expense_amount == 0:
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {"ok": True, "data": {"사업소득_필요_경비": 13_994_157}, "error": None},
+            }
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "data": {
+                    "사업소득_추가_경비_인정액": 27_543_987,
+                    "종합소득세_납부_할_세액": -621_639,
+                    "지방소득세_납부_할_세액": -62_164,
+                    "권장수수료": 185_000,
+                },
+                "error": None,
+            },
+        }
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    with pytest.raises(RuntimeError, match="bookkeeping expected tax amount send failed status=503"):
+        browser_control.send_bookkeeping_expected_tax_amount(
+            bot_id="sender-01",
+            payload={
+                "tax_doc_id": 1345836,
+                "submit_account_type": "CUSTOMER",
+                "total_business_expense_amount": 41_538_144,
+            },
+        )
+
+    assert [call["method"] for call in calls] == ["GET", "GET", "POST"]
+
+
 def test_send_bookkeeping_expected_tax_amount_rejects_total_expense_below_base(monkeypatch):
     def fake_run_in_cdp_session(bot_id, payload, callback):
         return callback(FakePage(), 29201)
