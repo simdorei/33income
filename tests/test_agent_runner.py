@@ -77,6 +77,20 @@ def stub_repeat_force_refresh(monkeypatch):
     return calls
 
 
+def test_runner_polls_commands_before_slow_keepalive(monkeypatch):
+    def fail_refresh_page(*, bot_id, payload, logger):
+        raise AssertionError("refresh_page must not run before queued commands")
+
+    monkeypatch.setenv("INCOME33_REFRESH_ENABLED", "1")
+    monkeypatch.setenv("INCOME33_REFRESH_INTERVAL_SECONDS", "600")
+    monkeypatch.setattr("income33.agent.runner.refresh_page", fail_refresh_page)
+    runner, client = build_runner(commands=[{"id": 99, "command": "status", "payload_json": "{}"}])
+
+    runner.run_once()
+
+    assert client.completed == [{"command_id": 99, "status": "done", "error_message": None}]
+
+
 def test_runner_heartbeat_includes_repo_version_info(monkeypatch):
     monkeypatch.setattr(
         "income33.agent.runner.collect_repo_version_info",
@@ -379,7 +393,8 @@ def test_runner_sender_only_guard_uses_control_tower_policy_set():
 def test_runner_handles_submit_tax_reports_command_on_reporter(monkeypatch):
     calls = []
 
-    def fake_submit_tax_reports(*, bot_id, payload, logger):
+    def fake_submit_tax_reports(*, bot_id, payload, logger, progress_callback=None):
+        assert callable(progress_callback)
         calls.append({"bot_id": bot_id, "payload": payload})
         assert client.heartbeats[-1]["current_step"] == "국세신고 응답수집 중"
         return {
@@ -415,7 +430,8 @@ def test_runner_submit_tax_reports_executes_once_even_when_payload_has_repeat_tr
     def fake_monotonic():
         return next(monotonic_points)
 
-    def fake_submit_tax_reports(*, bot_id, payload, logger):
+    def fake_submit_tax_reports(*, bot_id, payload, logger, progress_callback=None):
+        assert callable(progress_callback)
         calls.append({"bot_id": bot_id, "payload": payload})
         return {
             "status": "session_active",

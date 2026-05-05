@@ -902,13 +902,17 @@ def _browser_fetch_json(
     headers: dict[str, str] | None = None,
     json_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    timeout_ms = max(1_000, _env_int("INCOME33_BROWSER_FETCH_TIMEOUT_MS", 30_000))
     return page.evaluate(
         """
-        async ({url, method, headers, jsonBody}) => {
+        async ({url, method, headers, jsonBody, timeoutMs}) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
           const request = {
             method,
             headers: {...headers},
             credentials: 'include',
+            signal: controller.signal,
           };
           if (jsonBody !== null && jsonBody !== undefined) {
             request.headers['content-type'] = request.headers['content-type'] || 'application/json';
@@ -926,20 +930,27 @@ def _browser_fetch_json(
               json,
               text: json ? null : text.slice(0, 500),
               fetch_error: null,
+              timeout_ms: timeoutMs,
             };
           } catch (err) {
+            const errorText = err && err.name === 'AbortError'
+              ? `fetch_timeout_ms=${timeoutMs}`
+              : String(err);
             return {
               ok: false,
               status: 0,
               url,
               json: null,
               text: null,
-              fetch_error: String(err),
+              fetch_error: errorText,
+              timeout_ms: timeoutMs,
             };
+          } finally {
+            clearTimeout(timer);
           }
         }
         """,
-        {"url": url, "method": method, "headers": headers or {}, "jsonBody": json_body},
+        {"url": url, "method": method, "headers": headers or {}, "jsonBody": json_body, "timeoutMs": timeout_ms},
     )
 
 
@@ -1931,6 +1942,7 @@ def submit_tax_reports(
     bot_id: str,
     payload: dict[str, Any] | None = None,
     logger: logging.Logger | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     logger = logger or logging.getLogger("income33.agent.browser_control")
     payload = payload or {}
@@ -2053,6 +2065,19 @@ def submit_tax_reports(
         tax_doc_custom_type_filter_for_log,
         len(tax_doc_ids),
     )
+
+    def _emit_progress(step: str) -> None:
+        logger.info(
+            "tax_report_submit_progress bot_id=%s run_id=%s step=%s",
+            bot_id,
+            run_id,
+            step,
+        )
+        if callable(progress_callback):
+            try:
+                progress_callback(step)
+            except Exception:
+                logger.exception("tax_report_submit_progress_callback_failed bot_id=%s run_id=%s", bot_id, run_id)
 
     def _build_failure(
         *,
@@ -2369,8 +2394,14 @@ def submit_tax_reports(
             fallback=180.0,
         )
 
+        _emit_progress(
+            f"{report_label} CDP연결완료 debug_port={debug_port} "
+            f"선택유형={tax_doc_custom_type_filter_for_log} 요청={len(tax_doc_ids)}건"
+        )
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
-            page.goto(submit_web_path, wait_until="domcontentloaded")
+            _emit_progress(f"{report_label} NewTA 이동 시작 url={submit_web_path}")
+            page.goto(submit_web_path, wait_until="domcontentloaded", timeout=30_000)
+            _emit_progress(f"{report_label} NewTA 이동 완료")
 
         requested_fetch_page_size = int(
             payload.get("one_click_fetch_page_size")
@@ -2413,6 +2444,10 @@ def submit_tax_reports(
 
         one_click_tax_doc_ids = list(tax_doc_ids)
         requested_one_click_tax_doc_ids = list(one_click_tax_doc_ids)
+        _emit_progress(
+            f"{report_label} 시작 mode={'상태확인' if one_click_status_check_enabled else '신고제출'} "
+            f"선택유형={tax_doc_custom_type_filter_for_log} 요청={len(one_click_tax_doc_ids)}건"
+        )
         auto_fetch_pages: list[int] = []
         custom_type_filter_fetch_pages: list[int] = []
         one_click_tax_doc_rows_by_id: dict[int, dict[str, Any]] = {}
@@ -2435,6 +2470,7 @@ def submit_tax_reports(
             direction = str(payload.get("direction") or "ASC").upper()
 
             office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+            _emit_progress(f"{report_label} 수동ID 유형검증 세무서조회 시작")
             office_response = _browser_fetch_json(
                 page,
                 url=office_url,
@@ -2444,6 +2480,7 @@ def submit_tax_reports(
                     "x-web-path": submit_web_path,
                 },
             )
+            _emit_progress(f"{report_label} 수동ID 유형검증 세무서조회 완료 status={office_response.get('status')}")
             office_json = office_response.get("json") or {}
             if not office_response.get("ok") or not office_json.get("ok"):
                 raise RuntimeError(f"office lookup failed status={office_response.get('status')}")
@@ -2474,6 +2511,10 @@ def submit_tax_reports(
                     sort_field=sort_field,
                     direction=direction,
                 )
+                _emit_progress(
+                    f"{report_label} 수동ID 유형검증 목록조회 요청 page={page_index + 1} "
+                    f"선택유형={custom_type_filter}"
+                )
                 list_response = _browser_fetch_json(
                     page,
                     url=list_url,
@@ -2490,6 +2531,10 @@ def submit_tax_reports(
                 data = data if isinstance(data, dict) else {}
                 rows = data.get("content") if isinstance(data.get("content"), list) else []
                 fetched_pages.append(page_index)
+                _emit_progress(
+                    f"{report_label} 수동ID 유형검증 목록조회 page={page_index + 1} "
+                    f"선택유형={custom_type_filter} 매칭={len(matched_ids)}/{len(requested_ids)}건"
+                )
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
@@ -2536,6 +2581,7 @@ def submit_tax_reports(
             direction = str(payload.get("direction") or "ASC").upper()
 
             office_url = f"{api_base_url}/api/ta/info/v1/tax-offices/simple"
+            _emit_progress(f"{report_label} 전체조회 세무서조회 시작")
             office_response = _browser_fetch_json(
                 page,
                 url=office_url,
@@ -2545,6 +2591,7 @@ def submit_tax_reports(
                     "x-web-path": submit_web_path,
                 },
             )
+            _emit_progress(f"{report_label} 전체조회 세무서조회 완료 status={office_response.get('status')}")
             office_json = office_response.get("json") or {}
             if not office_response.get("ok") or not office_json.get("ok"):
                 raise RuntimeError(f"office lookup failed status={office_response.get('status')}")
@@ -2575,6 +2622,10 @@ def submit_tax_reports(
                     review_type_filter=review_type_filter,
                     sort_field=sort_field,
                     direction=direction,
+                )
+                _emit_progress(
+                    f"{report_label} 전체조회 요청 page={page_index + 1} "
+                    f"선택유형={tax_doc_custom_type_filter} 수집={len(collected_tax_doc_ids)}건"
                 )
                 list_response = _browser_fetch_json(
                     page,
@@ -2609,6 +2660,11 @@ def submit_tax_reports(
                     one_click_tax_doc_rows_by_id[normalized_tax_doc_id] = row
                     if max_auto_targets is not None and len(collected_tax_doc_ids) >= max_auto_targets:
                         break
+
+                _emit_progress(
+                    f"{report_label} 전체조회 page={page_index + 1} "
+                    f"선택유형={tax_doc_custom_type_filter} 수집={len(collected_tax_doc_ids)}건"
+                )
 
                 raw_total_pages = data.get("totalPages")
                 if total_pages is None:
@@ -3041,6 +3097,10 @@ def submit_tax_reports(
 
         existing_in_progress_tax_doc_ids = set(_list_one_click_in_progress_tax_doc_ids())
         prepare_target_ids = [tax_doc_id for tax_doc_id in one_click_tax_doc_ids if tax_doc_id not in existing_in_progress_tax_doc_ids]
+        _emit_progress(
+            f"{report_label} 대상확정 전체={len(one_click_tax_doc_ids)}건 "
+            f"기진행={len(existing_in_progress_tax_doc_ids)}건 준비대상={len(prepare_target_ids)}건"
+        )
 
         assign_result = {
             "assigned_count": 0,
@@ -3069,6 +3129,11 @@ def submit_tax_reports(
 
         for attempt_index, tax_doc_id in enumerate(prepare_target_ids, start=1):
             normalized_tax_doc_id = int(tax_doc_id)
+            if attempt_index == 1 or attempt_index % 20 == 0 or attempt_index == len(prepare_target_ids):
+                _emit_progress(
+                    f"{report_label} 세액확인/신고준비 {attempt_index}/{len(prepare_target_ids)}건 "
+                    f"eligible={len(eligible_tax_doc_ids)} 패스={len(results)} 실패={len(failures)}"
+                )
 
             summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
             try:
@@ -3292,12 +3357,21 @@ def submit_tax_reports(
             eligible_tax_doc_ids.append(normalized_tax_doc_id)
 
         eligible_tax_doc_id_set = set(eligible_tax_doc_ids)
+        _emit_progress(
+            f"{report_label} 신고시작 eligible={len(eligible_tax_doc_ids)}건 "
+            f"기진행={len(existing_in_progress_tax_doc_ids)}건 패스/실패={len(results)}건"
+        )
         attempt_index = 0
         for chunk_start in range(0, len(one_click_tax_doc_ids), submit_chunk_size):
             chunk_ids = one_click_tax_doc_ids[chunk_start : chunk_start + submit_chunk_size]
             for tax_doc_id in chunk_ids:
                 attempt_index += 1
                 normalized_tax_doc_id = int(tax_doc_id)
+                if attempt_index == 1 or attempt_index % 20 == 0 or attempt_index == len(one_click_tax_doc_ids):
+                    _emit_progress(
+                        f"{report_label} 신고제출 진행 {attempt_index}/{len(one_click_tax_doc_ids)}건 "
+                        f"성공={success_count} 진행중={in_progress_count} 패스/실패={len(results) - success_count - in_progress_count}"
+                    )
                 status_stage = "ta_submit_status"
                 status_stage_label = "신고제출상태확인"
 
@@ -3816,6 +3890,7 @@ def submit_tax_reports(
     else:
         run_handler = _run_legacy_submit
         mode_label = "legacy_submit"
+    _emit_progress(f"{report_label} CDP연결 시작 mode={mode_label} 선택유형={tax_doc_custom_type_filter_for_log}")
     result = _run_in_cdp_session(bot_id, payload, run_handler)
     logger.info(
         "tax_report_submit_done bot_id=%s run_id=%s attempted=%s success=%s skipped=%s failed=%s log_file=%s mode=%s",

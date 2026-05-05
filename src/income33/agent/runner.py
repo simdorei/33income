@@ -19,7 +19,6 @@ from income33.agent.browser_control import (
     resolve_refresh_interval_seconds,
     send_bookkeeping_expected_tax_amount,
     send_expected_tax_amounts,
-    send_rate_based_bookkeeping_expected_tax_amount,
     send_rate_based_bookkeeping_expected_tax_amounts,
     send_simple_expense_rate_expected_tax_amounts,
     submit_auth_code,
@@ -679,10 +678,16 @@ class AgentRunner:
         normalized_payload = self._normalize_send_tax_doc_payload(payload)
         self._set_bot_state("session_active", "국세신고 응답수집 중")
         self._send_current_state_heartbeat()
+
+        def progress_callback(step: str) -> None:
+            self._set_bot_state("session_active", step)
+            self._send_current_state_heartbeat()
+
         result = submit_tax_reports(
             bot_id=self.agent.bot_id,
             payload=normalized_payload,
             logger=logging.getLogger("income33.agent.browser_control"),
+            progress_callback=progress_callback,
         )
         self._set_bot_state(
             str(result.get("status") or "session_active"),
@@ -776,21 +781,24 @@ class AgentRunner:
         self.logger.debug("command_completed command_id=%s", command_id)
 
     def run_once(self) -> None:
-        self._run_keepalive_if_due()
-        self._probe_browser_login_state()
-        snapshot = self._apply_snapshot_override(self.bot.tick())
-        self.logger.debug("bot_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
-
-        self._send_snapshot_heartbeat(snapshot)
-
+        # Poll operator commands before slow CDP housekeeping.  Refresh/login probes can
+        # block for minutes when NewTA or the browser is slow; queued commands must not
+        # wait behind that maintenance path.
         commands = self.client.poll_commands(self.agent.pc_id, limit=5)
         self.logger.debug("polled_commands count=%s pc_id=%s", len(commands), self.agent.pc_id)
 
         for command in commands:
             self._handle_command(command)
 
-        if not commands:
-            self._run_repeated_send_if_due()
+        if commands:
+            return
+
+        self._run_keepalive_if_due()
+        self._probe_browser_login_state()
+        snapshot = self._apply_snapshot_override(self.bot.tick())
+        self.logger.debug("bot_snapshot=%s", json.dumps(snapshot.__dict__, ensure_ascii=False))
+        self._send_snapshot_heartbeat(snapshot)
+        self._run_repeated_send_if_due()
 
     def run_forever(self) -> None:
         interval = max(1, int(self.agent.heartbeat_interval_seconds))
