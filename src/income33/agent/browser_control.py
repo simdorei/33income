@@ -3132,7 +3132,7 @@ def submit_tax_reports(
             if attempt_index == 1 or attempt_index % 20 == 0 or attempt_index == len(prepare_target_ids):
                 _emit_progress(
                     f"{report_label} 세액확인/신고준비 {attempt_index}/{len(prepare_target_ids)}건 "
-                    f"eligible={len(eligible_tax_doc_ids)} 패스={len(results)} 실패={len(failures)}"
+                    f"신고후보={len(eligible_tax_doc_ids)} 처리결과={len(results)} 실패={len(failures)}"
                 )
 
             summary_url = f"{api_base_url}/api/tax/v1/gitax/taxdocs/{normalized_tax_doc_id}/submits/summary"
@@ -3358,8 +3358,8 @@ def submit_tax_reports(
 
         eligible_tax_doc_id_set = set(eligible_tax_doc_ids)
         _emit_progress(
-            f"{report_label} 신고시작 eligible={len(eligible_tax_doc_ids)}건 "
-            f"기진행={len(existing_in_progress_tax_doc_ids)}건 패스/실패={len(results)}건"
+            f"{report_label} 신고시작 신고후보={len(eligible_tax_doc_ids)}건 "
+            f"기진행={len(existing_in_progress_tax_doc_ids)}건 분류/차단/실패={len(results)}건"
         )
         attempt_index = 0
         for chunk_start in range(0, len(one_click_tax_doc_ids), submit_chunk_size):
@@ -3370,7 +3370,7 @@ def submit_tax_reports(
                 if attempt_index == 1 or attempt_index % 20 == 0 or attempt_index == len(one_click_tax_doc_ids):
                     _emit_progress(
                         f"{report_label} 신고제출 진행 {attempt_index}/{len(one_click_tax_doc_ids)}건 "
-                        f"성공={success_count} 진행중={in_progress_count} 패스/실패={len(results) - success_count - in_progress_count}"
+                        f"성공={success_count} 진행중={in_progress_count} 처리결과={len(results) - success_count - in_progress_count}"
                     )
                 status_stage = "ta_submit_status"
                 status_stage_label = "신고제출상태확인"
@@ -3619,6 +3619,13 @@ def submit_tax_reports(
 
         failed_count = len(failures)
         skipped_count = failed_count + blocked_industry_skip_count + unfavorable_tax_difference_skip_count
+        minus_amount_ah_classified_count = sum(
+            1
+            for failure in failures
+            if failure.get("stage") == "minus_amount_correction"
+            and failure.get("custom_type") == REPORT_SKIP_AFTER_MINUS_AMOUNT_CUSTOM_TYPE
+        )
+        ah_classified_count = blocked_industry_skip_count + minus_amount_ah_classified_count
         log_file_name = log_path.name if log_path else TAX_REPORT_SUBMIT_RESPONSE_LOG_FILE
         summary_log_file_name = summary_log_path.name if summary_log_path else TAX_REPORT_SUBMIT_FAILURE_SUMMARY_FILE
         log_label = log_file_name if failed_count else "없음"
@@ -3632,7 +3639,7 @@ def submit_tax_reports(
             "status": "session_active" if failed_count == 0 and guard_issue_count == 0 else "manual_required",
             "current_step": (
                 f"{report_label} 완료 성공={success_count}건 진행중={in_progress_count}건 "
-                f"패스={skipped_count}건 실패={failed_count}건 불리차이대기={unfavorable_tax_difference_skip_count}건"
+                f"아분류={ah_classified_count}건 마대기={unfavorable_tax_difference_skip_count}건 실패={failed_count}건"
                 f"{custom_type_failure_label}{waiting_failure_label} 공유로그={summary_log_label} 원본로그={log_label}"
             ),
             "debug_port": debug_port,
@@ -3643,6 +3650,8 @@ def submit_tax_reports(
             "in_progress_count": in_progress_count,
             "skipped_count": skipped_count,
             "blocked_industry_skip_count": blocked_industry_skip_count,
+            "ah_classified_count": ah_classified_count,
+            "minus_amount_ah_classified_count": minus_amount_ah_classified_count,
             "unfavorable_tax_difference_skip_count": unfavorable_tax_difference_skip_count,
             "unfavorable_custom_type_failed_count": unfavorable_custom_type_failed_count,
             "customer_waiting_failed_count": customer_waiting_failed_count,

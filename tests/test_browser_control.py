@@ -2751,6 +2751,89 @@ def test_submit_tax_reports_one_click_auto_fetch_targets_and_use_submit_ready_fi
     assert {row["tax_doc_custom_type_filter"] for row in in_progress_lines} == {"가"}
 
 
+def test_submit_tax_reports_one_click_ah_filter_reprocesses_logic_before_submit_or_ah_classification(monkeypatch):
+    calls = []
+
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29301)
+
+    def fake_browser_fetch_json(page, *, url, method="GET", headers=None, json_body=None):
+        calls.append({"url": url, "method": method, "headers": headers, "json_body": json_body})
+        if url.endswith("/api/ta/info/v1/tax-offices/simple"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": [{"id": 327}]}}
+        if "/api/tax/v1/taxdocs/filter-search" in url:
+            query = parse_qs(urlparse(url).query)
+            assert query["workflowFilterSet"] == ["SUBMIT_READY"]
+            assert query["taxDocCustomTypeFilter"] == ["아"]
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {"content": [{"taxDocId": 6101}, {"taxDocId": 6102}], "totalElements": 2, "totalPages": 1},
+                },
+            }
+        if url.endswith("/api/ta/v1/me"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"id": 817}}}
+        if url.endswith("/api/tax/v1/gitax/taxdocs/tax-accountants/assign"):
+            assert json_body == {"taxAccountantId": 817, "taxDocIdList": [6101, 6102]}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if "/api/tax/v1/gitax/taxdocs/" in url and url.endswith("/submits/summary"):
+            assert method == "GET"
+            return _one_click_summary_response()
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/6101/business-incomes"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"summary": {"itemList": []}}}}
+        if url.endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/6102/business-incomes"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "calculationType": "BOOKKEEPING",
+                        "summary": {"itemList": [{"사업자번호": "123-45-67890", "업종코드": "701101"}]},
+                    },
+                },
+            }
+        if url.endswith("/api/tax/v1/taxdocs/6102/custom-type"):
+            assert method == "PUT"
+            assert json_body == {"customType": "아"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": True}}
+        if url.endswith("/api/tax/v1/gitax/submit/6101/submit-category"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/6101/ta-submit"):
+            assert method == "PUT"
+            assert json_body == {"submitUserType": "APP_USER"}
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"category": "TA_ONECLICK"}}}
+        if url.endswith("/api/tax/v1/gitax/submit/6101/ta-submit/status"):
+            return {"ok": True, "status": 200, "json": {"ok": True, "data": {"status": "IN_PROGRESS"}}}
+        if "/api/tax/v1/gitax/submit/6102/" in url:
+            raise AssertionError("blocked-industry target must stop after 아 classification, not final submit")
+        if "/minus-amount/correction" in url:
+            raise AssertionError("blocked-industry target must not call minus correction")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_browser_fetch_json", fake_browser_fetch_json)
+
+    result = browser_control.submit_tax_reports(
+        bot_id="reporter-01",
+        payload={"one_click_submit": True, "tax_doc_custom_type_filter": "아"},
+    )
+
+    assert result["tax_doc_ids"] == [6101, 6102]
+    assert result["attempted_count"] == 2
+    assert result["in_progress_count"] == 1
+    assert result["blocked_industry_skip_count"] == 1
+    assert result["ah_classified_count"] == 1
+    assert result["eligible_tax_doc_ids"] == [6101]
+    assert "아분류=1건" in result["current_step"]
+    assert any(call["url"].endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/6101/business-incomes") for call in calls)
+    assert any(call["url"].endswith("/api/tax/v1/gitax/gross-incomes-prepaid-tax/6102/business-incomes") for call in calls)
+    assert any(call["url"].endswith("/api/tax/v1/gitax/submit/6101/ta-submit") for call in calls)
+    assert not any(call["url"].endswith("/api/tax/v1/gitax/submit/6102/ta-submit") for call in calls)
+
+
 def test_submit_tax_reports_one_click_manual_ids_respect_custom_type_filter(monkeypatch):
     calls = []
 
