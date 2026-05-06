@@ -201,6 +201,14 @@ def test_summary_and_root_dashboard(tmp_path):
     assert "일괄세션 확인" not in root.text
     assert "일괄 계산발송 시작" not in root.text
     assert "content='5'" in root.text
+    assert "class='metrics'" in root.text
+    assert "pc / host" in root.text
+    assert "status / heartbeat" in root.text
+    assert "version / repo" in root.text
+    assert "<th>state</th>" in root.text
+    assert "<th>work</th>" in root.text
+    assert "<th>timing</th>" in root.text
+    assert "host / counts" in root.text
     assert "/ui/bots/sender-01/commands/open_login" in root.text
     assert "/ui/bots/sender-01/commands/fill_login" in root.text
     assert "/ui/bots/sender-01/commands/preview_send_targets" not in root.text
@@ -284,7 +292,7 @@ def test_dashboard_and_api_show_last_workflow_result_per_bot(tmp_path):
 
     root = client.get("/")
     assert root.status_code == 200
-    assert "last_workflow_result" in root.text
+    assert "<th>work</th>" in root.text
     assert "done: send_expected_tax_amounts @ " in root.text
 
     bots_payload = client.get("/api/bots")
@@ -343,9 +351,10 @@ def test_api_bots_exposes_latency_and_heartbeat_age_read_model(tmp_path):
 
     root = client.get("/")
     assert root.status_code == 200
-    assert "heartbeat_age_seconds" in root.text
-    assert "last_command_queue_latency_ms" in root.text
-    assert "last_command_execution_latency_ms" in root.text
+    assert "<th>timing</th>" in root.text
+    assert "heartbeat" in root.text
+    assert "queue " in root.text
+    assert "exec " in root.text
 
 
 def test_summary_exposes_latency_p95_and_max_metrics(tmp_path):
@@ -460,10 +469,10 @@ def test_dashboard_shows_failed_workflow_error_in_separate_column(tmp_path):
 
     root = client.get("/")
     assert root.status_code == 200
-    assert "last_workflow_result" in root.text
+    assert "<th>work</th>" in root.text
     assert "failed: submit_tax_reports @ " in root.text
     assert "bad &lt;trace&gt;" in root.text
-    assert "last_heartbeat_at" in root.text
+    assert "heartbeat" in root.text
 
 
 def test_heartbeat_persists_agent_repo_version_fields_and_dashboard_shows_status(tmp_path):
@@ -1796,5 +1805,5 @@ def test_dashboard_and_api_include_typed_session_adhesion_fields(tmp_path):
 
     root = client.get("/")
     assert root.status_code == 200
-    assert "session_status" in root.text
-    assert "adhesion_level" in root.text
+    assert "session" in root.text
+    assert "adhesion" in root.text
