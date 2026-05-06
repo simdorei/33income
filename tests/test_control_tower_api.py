@@ -296,6 +296,92 @@ def test_dashboard_and_api_show_last_workflow_result_per_bot(tmp_path):
     assert sender_row["last_workflow_finished_at"]
 
 
+def test_api_bots_exposes_latency_and_heartbeat_age_read_model(tmp_path):
+    client = build_client(tmp_path)
+
+    heartbeat = client.post(
+        "/api/agents/heartbeat",
+        json={
+            "pc_id": "pc-01",
+            "hostname": "BOT-PC-01",
+            "ip_address": "192.168.0.101",
+            "agent_status": "online",
+            "bot_id": "sender-01",
+            "bot_status": "session_active",
+            "current_step": "대기",
+        },
+    )
+    assert heartbeat.status_code == 200
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    assert len(polled.json()["commands"]) == 1
+
+    completed = client.post(
+        f"/api/commands/{command_id}/complete",
+        json={"status": "done"},
+    )
+    assert completed.status_code == 200
+
+    bots_payload = client.get("/api/bots")
+    assert bots_payload.status_code == 200
+    sender_row = next(row for row in bots_payload.json()["bots"] if row["bot_id"] == "sender-01")
+
+    assert isinstance(sender_row["last_command_queue_latency_ms"], int)
+    assert sender_row["last_command_queue_latency_ms"] >= 0
+    assert isinstance(sender_row["last_command_execution_latency_ms"], int)
+    assert sender_row["last_command_execution_latency_ms"] >= 0
+    assert isinstance(sender_row["heartbeat_age_seconds"], int)
+    assert sender_row["heartbeat_age_seconds"] >= 0
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "heartbeat_age_seconds" in root.text
+    assert "last_command_queue_latency_ms" in root.text
+    assert "last_command_execution_latency_ms" in root.text
+
+
+def test_summary_exposes_latency_p95_and_max_metrics(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    polled = client.get("/api/agents/pc-01/commands/poll")
+    assert polled.status_code == 200
+    assert len(polled.json()["commands"]) == 1
+
+    completed = client.post(
+        f"/api/commands/{command_id}/complete",
+        json={"status": "done"},
+    )
+    assert completed.status_code == 200
+
+    summary = client.get("/api/summary")
+    assert summary.status_code == 200
+    payload = summary.json()
+    assert payload["command_latency_sample_size"] >= 1
+    assert isinstance(payload["queue_latency_p95_ms"], int)
+    assert payload["queue_latency_p95_ms"] >= 0
+    assert isinstance(payload["queue_latency_max_ms"], int)
+    assert payload["queue_latency_max_ms"] >= 0
+    assert isinstance(payload["execution_latency_p95_ms"], int)
+    assert payload["execution_latency_p95_ms"] >= 0
+    assert isinstance(payload["execution_latency_max_ms"], int)
+    assert payload["execution_latency_max_ms"] >= 0
+
+
 def test_api_bots_last_workflow_result_uses_finished_at_not_command_id(tmp_path):
     client = build_client(tmp_path)
 
@@ -1509,3 +1595,206 @@ def test_heartbeat_marks_slot_connected_and_updates_bot(tmp_path):
     assert root.status_code == 200
     assert "sender-01" in root.text
     assert "step_a" in root.text
+
+
+def test_command_completion_alias_endpoint_completes_command(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "start", "payload": {}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    response = client.post(
+        f"/api/commands/{command_id}/completion",
+        json={"status": "done"},
+    )
+    assert response.status_code == 200
+    assert response.json()["id"] == command_id
+    assert response.json()["status"] == "done"
+
+
+def test_bot_command_active_and_recent_wrapper_endpoints_filter_by_bot(tmp_path):
+    client = build_client(tmp_path)
+
+    sender_command = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    reporter_command = client.post(
+        "/api/bots/reporter-01/commands",
+        json={"command": "submit_tax_reports", "payload": {"tax_doc_ids": [1001]}},
+    )
+    assert sender_command.status_code == 200
+    assert reporter_command.status_code == 200
+
+    sender_active = client.get("/api/bots/sender-01/commands/active")
+    reporter_active = client.get("/api/bots/reporter-01/commands/active")
+    sender_recent = client.get("/api/bots/sender-01/commands/recent")
+    reporter_recent = client.get("/api/bots/reporter-01/commands/recent")
+
+    assert sender_active.status_code == 200
+    assert reporter_active.status_code == 200
+    assert sender_recent.status_code == 200
+    assert reporter_recent.status_code == 200
+
+    assert all(command["bot_id"] == "sender-01" for command in sender_active.json()["commands"])
+    assert all(command["bot_id"] == "reporter-01" for command in reporter_active.json()["commands"])
+    assert all(command["bot_id"] == "sender-01" for command in sender_recent.json()["commands"])
+    assert all(command["bot_id"] == "reporter-01" for command in reporter_recent.json()["commands"])
+
+
+def test_workflow_wrapper_endpoints_enqueue_compatible_commands(tmp_path):
+    client = build_client(tmp_path)
+
+    expected_tax = client.post(
+        "/api/senders/sender-01/expected-tax/send",
+        json={"payload": {"tax_doc_ids": [11, 12]}},
+    )
+    simple_expense = client.post(
+        "/api/senders/sender-01/simple-expense-rate/send",
+        json={"payload": {}},
+    )
+    rate_based = client.post(
+        "/api/senders/sender-01/rate-based-bookkeeping/send",
+        json={"payload": {"tax_doc_ids": [13]}},
+    )
+    submit_reports = client.post(
+        "/api/reporters/reporter-01/tax-reports/submit",
+        json={"payload": {"tax_doc_ids": [1001], "prepare_only": True}},
+    )
+    submit_status_check = client.post(
+        "/api/reporters/reporter-01/tax-reports/submit-status-check",
+        json={"payload": {"tax_doc_ids": [1002]}},
+    )
+
+    assert expected_tax.status_code == 200
+    assert simple_expense.status_code == 200
+    assert rate_based.status_code == 200
+    assert submit_reports.status_code == 200
+    assert submit_status_check.status_code == 200
+
+    assert expected_tax.json()["command"] == "send_expected_tax_amounts"
+    assert simple_expense.json()["command"] == "send_simple_expense_rate_expected_tax_amounts"
+    assert rate_based.json()["command"] == "send_rate_based_bookkeeping_expected_tax_amounts"
+    assert submit_reports.json()["command"] == "submit_tax_reports"
+    assert submit_status_check.json()["command"] == "submit_tax_reports"
+
+    submit_status_payload = _decoded_payload(submit_status_check.json())
+    assert submit_status_payload["tax_doc_ids"] == [1002]
+    assert submit_status_payload["one_click_submit"] is True
+    assert submit_status_payload["one_click_submit_status_check"] is True
+
+
+def test_workflow_wrapper_direct_payload_is_preserved_and_mixed_body_rejected(tmp_path):
+    client = build_client(tmp_path)
+
+    direct = client.post(
+        "/api/senders/sender-01/expected-tax/send",
+        json={"tax_doc_ids": [11, 12], "client_request_id": "req-1"},
+    )
+    envelope = client.post(
+        "/api/senders/sender-01/expected-tax/send",
+        json={"payload": {"tax_doc_ids": [13]}},
+    )
+    assert direct.status_code == 200
+    direct_payload = _decoded_payload(direct.json())
+    assert direct_payload["tax_doc_ids"] == [11, 12]
+    assert direct_payload["client_request_id"] == "req-1"
+    assert "_retry" in direct_payload
+    assert envelope.status_code == 200
+    envelope_payload = _decoded_payload(envelope.json())
+    assert envelope_payload["tax_doc_ids"] == [13]
+    assert "_retry" in envelope_payload
+
+    mixed = client.post(
+        "/api/senders/sender-01/expected-tax/send",
+        json={"payload": {"tax_doc_ids": [14]}, "tax_doc_ids": [15]},
+    )
+    assert mixed.status_code == 400
+
+
+def test_workflow_submit_status_check_wrapper_queues_ui_equivalent_payload(tmp_path):
+    client = build_client(tmp_path)
+
+    direct = client.post(
+        "/api/reporters/reporter-01/tax-reports/submit-status-check",
+        json={"tax_doc_ids": [1001]},
+    )
+    empty = client.post(
+        "/api/reporters/reporter-01/tax-reports/submit-status-check",
+        json={},
+    )
+
+    assert direct.status_code == 200
+    assert direct.json()["command"] == "submit_tax_reports"
+    direct_payload = _decoded_payload(direct.json())
+    assert direct_payload["tax_doc_ids"] == [1001]
+    assert direct_payload["one_click_submit"] is True
+    assert direct_payload["one_click_submit_status_check"] is True
+
+    assert empty.status_code == 200
+    empty_payload = _decoded_payload(empty.json())
+    assert empty_payload["tax_doc_ids"] == []
+    assert empty_payload["one_click_submit"] is True
+    assert empty_payload["one_click_submit_status_check"] is True
+
+
+def test_session_wrapper_endpoints_queue_refresh_and_probe_and_read_status(tmp_path):
+    client = build_client(tmp_path)
+
+    refresh = client.post("/api/bots/sender-01/session/refresh", json={"payload": {}})
+    probe = client.post("/api/bots/sender-01/session/probe", json={"payload": {}})
+    session = client.get("/api/bots/sender-01/session")
+
+    assert refresh.status_code == 200
+    assert probe.status_code == 200
+    assert session.status_code == 200
+
+    payload = session.json()
+    assert refresh.json()["command"] == "refresh_page"
+    assert probe.json()["command"] == "status"
+    assert payload["bot_id"] == "sender-01"
+    assert "status" in payload
+    assert "current_step" in payload
+    assert "last_heartbeat_at" in payload
+    assert payload["session_status"] in {"active", "login_required", "auth_required", "stale", "unknown"}
+    assert payload["adhesion_level"] in {"high", "medium", "low", "none"}
+    assert isinstance(payload["adhesion_score"], int)
+    assert isinstance(payload["affinity"], dict)
+    assert payload["affinity"]["bot_id"] == "sender-01"
+
+
+def test_dashboard_and_api_include_typed_session_adhesion_fields(tmp_path):
+    client = build_client(tmp_path)
+
+    heartbeat = {
+        "pc_id": "pc-01",
+        "hostname": "WIN-PC-01",
+        "ip_address": "127.0.0.1",
+        "agent_status": "online",
+        "bot_id": "sender-01",
+        "bot_status": "session_active",
+        "current_step": "session_active",
+        "success_count": 1,
+        "failure_count": 0,
+    }
+    hb = client.post("/api/agents/heartbeat", json=heartbeat)
+    assert hb.status_code == 200
+
+    bots = client.get("/api/bots")
+    assert bots.status_code == 200
+    sender = next(row for row in bots.json()["bots"] if row["bot_id"] == "sender-01")
+
+    assert sender["session_status"] == "active"
+    assert sender["adhesion_level"] in {"high", "medium"}
+    assert isinstance(sender["adhesion_score"], int)
+    assert sender["affinity_hostname"] == "WIN-PC-01"
+    assert sender["affinity_ip_address"] == "127.0.0.1"
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "session_status" in root.text
+    assert "adhesion_level" in root.text

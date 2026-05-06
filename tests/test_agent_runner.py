@@ -229,6 +229,10 @@ def test_runner_handles_preview_send_targets_command(monkeypatch):
         "income33.agent.runner.preview_expected_tax_send_targets",
         fake_preview_expected_tax_send_targets,
     )
+    monkeypatch.setattr(
+        "income33.agent.runner.inspect_login_state",
+        lambda *, bot_id, payload, logger: {"status": "session_active", "current_step": "session_active"},
+    )
     runner, client = build_runner(
         [
             {
@@ -258,7 +262,7 @@ def test_runner_handles_send_expected_tax_amounts_command(monkeypatch):
         }
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -601,6 +605,10 @@ def test_runner_handles_bulk_rate_based_bookkeeping_commands(monkeypatch):
         "income33.agent.runner.send_rate_based_bookkeeping_expected_tax_amounts",
         fake_send_rate_based_bookkeeping_expected_tax_amounts,
     )
+    monkeypatch.setattr(
+        "income33.agent.runner.inspect_login_state",
+        lambda *, bot_id, payload, logger: {"status": "session_active", "current_step": "session_active"},
+    )
     runner, client = build_runner(
         [
             {
@@ -636,7 +644,7 @@ def test_runner_reports_send_in_progress_before_blocking_send(monkeypatch):
         return {"status": "session_active", "current_step": "계산발송 완료"}
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [{"id": 19, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
     )
@@ -651,7 +659,7 @@ def test_runner_uses_retry_policy_interval_and_max_attempts_from_payload(monkeyp
         return {"status": "session_active", "current_step": "계산발송 완료", "tax_doc_ids": [1360165]}
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -674,7 +682,7 @@ def test_runner_reports_failure_step_when_send_command_fails(monkeypatch):
         raise RuntimeError("send api failed")
 
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [{"id": 20, "command": "send_expected_tax_amounts", "payload_json": "{}"}]
     )
@@ -701,7 +709,7 @@ def test_runner_does_not_repeat_explicit_tax_doc_ids_without_repeat_opt_in(monke
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, _ = build_runner(
         [
             {
@@ -921,7 +929,7 @@ def test_runner_ignores_false_auth_probe_while_repeat_send_is_scheduled(monkeypa
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {
@@ -996,7 +1004,7 @@ def test_runner_repeat_fallback_does_not_assign_before_three_total_attempts(monk
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -1088,7 +1096,7 @@ def test_runner_repeat_fallback_assigns_once_after_three_total_attempts(monkeypa
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -1131,7 +1139,7 @@ def test_runner_keeps_repeating_after_leftover_assignment(monkeypatch):
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     monkeypatch.setattr(
         "income33.agent.runner.assign_taxdocs_to_current_accountant",
         fake_assign_taxdocs_to_current_accountant,
@@ -1170,7 +1178,7 @@ def test_runner_cancels_repeated_send_when_operator_queues_control_command(monke
 
     monkeypatch.setattr("income33.agent.runner.inspect_login_state", lambda **kwargs: None)
     monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
-    refresh_calls = stub_repeat_force_refresh(monkeypatch)
+    stub_repeat_force_refresh(monkeypatch)
     runner, client = build_runner(
         [
             {"id": 16, "command": "send_expected_tax_amounts", "payload_json": "{}"},
@@ -1331,3 +1339,143 @@ def test_non_running_statuses_do_not_advance_steps():
     assert first.status == "login_opened"
     assert first.current_step == "login_opened"
     assert second.current_step == "login_opened"
+
+
+def test_run_forever_uses_command_poll_interval_separately(monkeypatch):
+    runner, _ = build_runner()
+    runner.agent.heartbeat_interval_seconds = 5
+    runner.agent.command_poll_interval_seconds = 1
+
+    timeline = {"t": 0.0}
+    poll_calls = []
+    housekeeping_calls = []
+    sleep_calls = []
+
+    def fake_monotonic():
+        return timeline["t"]
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        timeline["t"] += seconds
+        if len(sleep_calls) >= 6:
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr("income33.agent.runner.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("income33.agent.runner.time.sleep", fake_sleep)
+    monkeypatch.setattr(
+        runner,
+        "_poll_and_handle_commands_once",
+        lambda **_: poll_calls.append(timeline["t"]) or 0,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_housekeeping_cycle_once",
+        lambda: housekeeping_calls.append(timeline["t"]),
+    )
+
+    try:
+        runner.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    assert len(poll_calls) >= 6
+    assert len(housekeeping_calls) == 2
+    assert len(housekeeping_calls) < len(poll_calls)
+
+
+def test_safe_preflight_blocks_preview_when_session_not_active(monkeypatch):
+    preview_calls = []
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        return {"status": "login_required", "current_step": "login_required"}
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        preview_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "ok"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    monkeypatch.setattr(
+        "income33.agent.runner.preview_expected_tax_send_targets",
+        fake_preview_expected_tax_send_targets,
+    )
+
+    runner, client = build_runner(
+        [{"id": 301, "command": "preview_send_targets", "payload_json": json.dumps({"year": 2025})}]
+    )
+
+    runner.run_once()
+
+    assert preview_calls == []
+    assert client.completed == [
+        {
+            "command_id": 301,
+            "status": "failed",
+            "error_message": "SESSION_PREFLIGHT_FAILED: status=login_required step=login_required",
+        }
+    ]
+
+
+def test_safe_command_retries_once_after_session_recovery(monkeypatch):
+    preview_call_count = {"count": 0}
+    refresh_calls = []
+    inspect_calls = []
+
+    def fake_inspect_login_state(*, bot_id, payload, logger):
+        inspect_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_active"}
+
+    def fake_refresh_page(*, bot_id, payload, logger):
+        refresh_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_refresh"}
+
+    def fake_preview_expected_tax_send_targets(*, bot_id, payload, logger):
+        preview_call_count["count"] += 1
+        if preview_call_count["count"] == 1:
+            raise RuntimeError("Execution context was destroyed")
+        return {"status": "session_active", "current_step": "ok"}
+
+    monkeypatch.setattr("income33.agent.runner.inspect_login_state", fake_inspect_login_state)
+    monkeypatch.setattr("income33.agent.runner.refresh_page", fake_refresh_page)
+    monkeypatch.setattr(
+        "income33.agent.runner.preview_expected_tax_send_targets",
+        fake_preview_expected_tax_send_targets,
+    )
+
+    runner, client = build_runner(
+        [{"id": 302, "command": "preview_send_targets", "payload_json": json.dumps({"year": 2025})}]
+    )
+
+    runner.run_once()
+
+    assert preview_call_count["count"] == 2
+    assert len(refresh_calls) == 1
+    assert len(inspect_calls) >= 2
+    assert client.completed == [{"command_id": 302, "status": "done", "error_message": None}]
+
+
+def test_state_changing_command_fails_closed_on_session_loss_without_retry(monkeypatch):
+    send_calls = []
+    refresh_calls = []
+
+    def fake_send_expected_tax_amounts(*, bot_id, payload, logger):
+        send_calls.append({"bot_id": bot_id, "payload": payload})
+        raise RuntimeError("Execution context was destroyed")
+
+    def fake_refresh_page(*, bot_id, payload, logger):
+        refresh_calls.append({"bot_id": bot_id, "payload": payload})
+        return {"status": "session_active", "current_step": "session_refresh"}
+
+    monkeypatch.setattr("income33.agent.runner.send_expected_tax_amounts", fake_send_expected_tax_amounts)
+    monkeypatch.setattr("income33.agent.runner.refresh_page", fake_refresh_page)
+
+    runner, client = build_runner(
+        [{"id": 303, "command": "send_expected_tax_amounts", "payload_json": json.dumps({"tax_doc_ids": [1]})}]
+    )
+
+    runner.run_once()
+
+    assert len(send_calls) == 1
+    assert refresh_calls == []
+    assert client.completed[0]["command_id"] == 303
+    assert client.completed[0]["status"] == "failed"
+    assert "Execution context was destroyed" in str(client.completed[0]["error_message"])

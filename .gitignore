@@ -25,6 +25,9 @@ tmp/
 dist/
 bookkeeping_zero_additional_expense_*.json
 
+# Hermes/local planning artifacts
+.hermes/
+
 # IDE / OS
 .vscode/
 .idea/

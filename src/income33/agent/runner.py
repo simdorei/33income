@@ -13,6 +13,7 @@ from income33.agent.browser_control import (
     inspect_login_state,
     is_keepalive_due,
     is_refresh_enabled,
+    is_session_recovery_exception,
     preview_expected_tax_send_targets,
     preview_rate_based_bookkeeping_expected_tax_amounts,
     refresh_page,
@@ -69,6 +70,21 @@ _REPEAT_SEND_CONTINUABLE_STATUSES = {
 }
 
 _AUTH_EXPIRED_STATUS_CODES = frozenset({401, 403})
+
+_STATE_CHANGING_COMMANDS = {
+    "send_expected_tax_amounts",
+    "send_simple_expense_rate_expected_tax_amounts",
+    "send_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amounts",
+    "submit_tax_reports",
+}
+
+_PREFLIGHT_SAFE_COMMANDS = {
+    "refresh_page",
+    "preview_send_targets",
+    "preview_rate_based_bookkeeping_expected_tax_amounts",
+}
 
 
 def _build_bot_runner(agent: AgentConfig):
@@ -166,6 +182,70 @@ class AgentRunner:
             seen_tax_doc_ids.add(tax_doc_id)
             normalized_tax_doc_ids.append(tax_doc_id)
         return normalized_tax_doc_ids
+
+    @staticmethod
+    def _is_state_changing_command(command_name: str) -> bool:
+        return command_name in _STATE_CHANGING_COMMANDS
+
+    @staticmethod
+    def _is_safe_preflight_command(command_name: str) -> bool:
+        return command_name in _PREFLIGHT_SAFE_COMMANDS
+
+    @classmethod
+    def _is_recoverable_session_exception(cls, exc: Exception) -> bool:
+        return is_session_recovery_exception(exc)
+
+    def _run_safe_session_preflight(self, command_name: str, payload: dict[str, Any]) -> None:
+        if not self._is_safe_preflight_command(command_name):
+            return
+
+        probe = inspect_login_state(
+            bot_id=self.agent.bot_id,
+            payload=payload,
+            logger=logging.getLogger("income33.agent.browser_control"),
+        )
+        preflight_status = str(probe.get("status") or "unknown")
+        preflight_step = str(probe.get("current_step") or preflight_status)
+        if preflight_status in {"session_active", "running", "waiting"}:
+            self._set_bot_state(preflight_status, preflight_step)
+            return
+
+        self._set_bot_state(preflight_status, preflight_step)
+        raise RuntimeError(f"SESSION_PREFLIGHT_FAILED: status={preflight_status} step={preflight_step}")
+
+    def _attempt_safe_session_recovery_once(self, command_name: str, payload: dict[str, Any]) -> bool:
+        if self._is_state_changing_command(command_name):
+            return False
+        if command_name in {"start", "stop", "restart", "login_done"}:
+            return False
+
+        try:
+            refresh_result = refresh_page(
+                bot_id=self.agent.bot_id,
+                payload={"force": True},
+                logger=logging.getLogger("income33.agent.browser_control"),
+            )
+            refreshed_status = str(refresh_result.get("status") or "session_active")
+            refreshed_step = str(refresh_result.get("current_step") or "session_refresh")
+            self._set_bot_state(refreshed_status, refreshed_step)
+
+            probe = inspect_login_state(
+                bot_id=self.agent.bot_id,
+                payload=payload,
+                logger=logging.getLogger("income33.agent.browser_control"),
+            )
+            probe_status = str(probe.get("status") or "unknown")
+            probe_step = str(probe.get("current_step") or probe_status)
+            self._set_bot_state(probe_status, probe_step)
+            return probe_status in {"session_active", "running", "waiting"}
+        except Exception as recovery_exc:  # pragma: no cover (network/runtime dependent)
+            self.logger.warning(
+                "safe_session_recovery_failed bot_id=%s command=%s error=%s",
+                self.agent.bot_id,
+                command_name,
+                recovery_exc,
+            )
+            return False
 
     @classmethod
     def _normalize_send_tax_doc_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
@@ -732,12 +812,16 @@ class AgentRunner:
         if command_name == "send_expected_tax_amounts":
             self._cancel_repeated_send()
         failure_prefix = self._failure_step_messages.get(command_name)
+        message = str(exc)
+        if self._is_recoverable_session_exception(exc):
+            self._set_bot_state("login_required", f"세션 복구 필요: {message}")
+            return
         if failure_prefix:
-            status_code = self._extract_status_code(str(exc))
+            status_code = self._extract_status_code(message)
             if status_code in _AUTH_EXPIRED_STATUS_CODES:
-                self._set_bot_state("login_required", f"세션 만료 / 로그인 필요: {exc}")
+                self._set_bot_state("login_required", f"세션 만료 / 로그인 필요: {message}")
                 return
-            self._set_bot_state("manual_required", f"{failure_prefix}: {exc}")
+            self._set_bot_state("manual_required", f"{failure_prefix}: {message}")
 
     def _handle_command(self, command: dict[str, Any]) -> None:
         command_name = command["command"]
@@ -759,7 +843,26 @@ class AgentRunner:
                 raise ValueError(f"SENDER_ONLY_COMMAND: {command_name}")
             if self.agent.bot_type != "reporter" and command_name in reporter_only_commands():
                 raise ValueError(f"REPORTER_ONLY_COMMAND: {command_name}")
-            self._dispatch_command(command_name, payload, retry_policy)
+
+            self._run_safe_session_preflight(command_name, payload)
+
+            try:
+                self._dispatch_command(command_name, payload, retry_policy)
+            except Exception as dispatch_exc:
+                recoverable = self._is_recoverable_session_exception(dispatch_exc)
+                recovered = False
+                if recoverable:
+                    recovered = self._attempt_safe_session_recovery_once(command_name, payload)
+                if recoverable and recovered:
+                    self.logger.warning(
+                        "command_session_recovered_retry command_id=%s command=%s bot_id=%s",
+                        command_id,
+                        command_name,
+                        self.agent.bot_id,
+                    )
+                    self._dispatch_command(command_name, payload, retry_policy)
+                else:
+                    raise
         except Exception as exc:
             self._apply_failure_state_for_command(command_name, exc)
             self.client.complete_command(
@@ -780,19 +883,14 @@ class AgentRunner:
         self._send_current_state_heartbeat()
         self.logger.debug("command_completed command_id=%s", command_id)
 
-    def run_once(self) -> None:
-        # Poll operator commands before slow CDP housekeeping.  Refresh/login probes can
-        # block for minutes when NewTA or the browser is slow; queued commands must not
-        # wait behind that maintenance path.
-        commands = self.client.poll_commands(self.agent.pc_id, limit=5)
+    def _poll_and_handle_commands_once(self, *, limit: int = 5) -> int:
+        commands = self.client.poll_commands(self.agent.pc_id, limit=limit)
         self.logger.debug("polled_commands count=%s pc_id=%s", len(commands), self.agent.pc_id)
-
         for command in commands:
             self._handle_command(command)
+        return len(commands)
 
-        if commands:
-            return
-
+    def _run_housekeeping_cycle_once(self) -> None:
         self._run_keepalive_if_due()
         self._probe_browser_login_state()
         snapshot = self._apply_snapshot_override(self.bot.tick())
@@ -800,22 +898,52 @@ class AgentRunner:
         self._send_snapshot_heartbeat(snapshot)
         self._run_repeated_send_if_due()
 
+    def run_once(self) -> None:
+        # Poll operator commands before slow CDP housekeeping. Refresh/login probes can
+        # block for minutes when NewTA or the browser is slow; queued commands must not
+        # wait behind that maintenance path.
+        command_count = self._poll_and_handle_commands_once(limit=5)
+        if command_count:
+            return
+        self._run_housekeeping_cycle_once()
+
     def run_forever(self) -> None:
-        interval = max(1, int(self.agent.heartbeat_interval_seconds))
+        heartbeat_interval = max(1, int(self.agent.heartbeat_interval_seconds))
+        poll_interval = max(1, int(getattr(self.agent, "command_poll_interval_seconds", 1)))
+
         self.logger.info(
-            "agent_runner_started pc_id=%s bot_id=%s tower=%s interval=%s",
+            "agent_runner_started pc_id=%s bot_id=%s tower=%s heartbeat_interval=%s poll_interval=%s",
             self.agent.pc_id,
             self.agent.bot_id,
             self.agent.control_tower_url,
-            interval,
+            heartbeat_interval,
+            poll_interval,
         )
 
+        now = time.monotonic()
+        next_poll_at = now
+        next_housekeeping_at = now
+
         while True:
+            cycle_now = time.monotonic()
+
             try:
-                self.run_once()
+                if cycle_now >= next_poll_at:
+                    self._poll_and_handle_commands_once(limit=5)
+                    while next_poll_at <= cycle_now:
+                        next_poll_at += poll_interval
+
+                cycle_now = time.monotonic()
+                if cycle_now >= next_housekeeping_at:
+                    self._run_housekeeping_cycle_once()
+                    while next_housekeeping_at <= cycle_now:
+                        next_housekeeping_at += heartbeat_interval
             except Exception:  # pragma: no cover (network/runtime dependent)
                 self.logger.exception("agent_cycle_failed pc_id=%s", self.agent.pc_id)
-            time.sleep(interval)
+
+            sleep_until = min(next_poll_at, next_housekeeping_at)
+            sleep_seconds = max(0.05, min(1.0, sleep_until - time.monotonic()))
+            time.sleep(sleep_seconds)
 
 
 def main() -> None:

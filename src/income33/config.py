@@ -27,6 +27,7 @@ class AgentConfig:
     bot_id: str = "sender-01"
     bot_type: str = "sender"
     heartbeat_interval_seconds: int = 5
+    command_poll_interval_seconds: int = 1
 
 
 @dataclass
@@ -109,9 +110,19 @@ def load_config(
         "INCOME33_AGENT_BOT_TYPE",
         str(bot_section.get("bot_type", agent_section.get("bot_type", "sender"))),
     )
-    heartbeat_interval = _env_int(
-        "INCOME33_AGENT_HEARTBEAT_INTERVAL_SECONDS",
-        int(agent_section.get("heartbeat_interval_seconds", 5)),
+    heartbeat_interval = max(
+        1,
+        _env_int(
+            "INCOME33_AGENT_HEARTBEAT_INTERVAL_SECONDS",
+            int(agent_section.get("heartbeat_interval_seconds", 5)),
+        ),
+    )
+    command_poll_interval = max(
+        1,
+        _env_int(
+            "INCOME33_AGENT_COMMAND_POLL_INTERVAL_SECONDS",
+            int(agent_section.get("command_poll_interval_seconds", 1)),
+        ),
     )
 
     return AppConfig(
@@ -130,5 +141,6 @@ def load_config(
             bot_id=bot_id,
             bot_type=bot_type,
             heartbeat_interval_seconds=heartbeat_interval,
+            command_poll_interval_seconds=command_poll_interval,
         ),
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,14 @@ class Database:
         if value is None:
             return None
         return 1 if bool(value) else 0
+
+    @staticmethod
+    def _percentile(values: list[int], percentile: float) -> int | None:
+        if not values:
+            return None
+        sorted_values = sorted(values)
+        rank = max(1, math.ceil(percentile * len(sorted_values)))
+        return sorted_values[rank - 1]
 
     def init_db(self) -> None:
         db_path = Path(self.path)
@@ -330,12 +339,38 @@ class Database:
                 LIMIT 1
             )
         """
+        latest_completed_join = """
+            LEFT JOIN commands latest_completed_command ON latest_completed_command.id = (
+                SELECT c3.id
+                FROM commands c3
+                WHERE c3.bot_id = b.bot_id
+                  AND c3.status IN ('done', 'failed')
+                  AND c3.finished_at IS NOT NULL
+                ORDER BY c3.finished_at DESC, c3.id DESC
+                LIMIT 1
+            )
+        """
         select_columns = """
             b.*,
             latest_workflow_command.command AS last_workflow_command_name,
             latest_workflow_command.status AS last_workflow_command_status,
             latest_workflow_command.finished_at AS last_workflow_finished_at,
-            latest_workflow_command.error_message AS last_workflow_error_message
+            latest_workflow_command.error_message AS last_workflow_error_message,
+            CASE
+                WHEN latest_completed_command.picked_at IS NOT NULL
+                THEN CAST((julianday(latest_completed_command.picked_at) - julianday(latest_completed_command.created_at)) * 86400000 AS INTEGER)
+                ELSE NULL
+            END AS last_command_queue_latency_ms,
+            CASE
+                WHEN latest_completed_command.finished_at IS NOT NULL AND latest_completed_command.picked_at IS NOT NULL
+                THEN CAST((julianday(latest_completed_command.finished_at) - julianday(latest_completed_command.picked_at)) * 86400000 AS INTEGER)
+                ELSE NULL
+            END AS last_command_execution_latency_ms,
+            CASE
+                WHEN b.last_heartbeat_at IS NOT NULL
+                THEN CAST((julianday('now') - julianday(b.last_heartbeat_at)) * 86400 AS INTEGER)
+                ELSE NULL
+            END AS heartbeat_age_seconds
         """
         workflow_params: tuple[str, ...] = WORKFLOW_RESULT_COMMANDS
         with self._connect() as conn:
@@ -345,6 +380,7 @@ class Database:
                     SELECT {select_columns}
                     FROM bots b
                     {latest_workflow_join}
+                    {latest_completed_join}
                     WHERE b.bot_type = ?
                     ORDER BY b.bot_id ASC
                     """,
@@ -356,6 +392,7 @@ class Database:
                     SELECT {select_columns}
                     FROM bots b
                     {latest_workflow_join}
+                    {latest_completed_join}
                     ORDER BY b.bot_id ASC
                     """,
                     workflow_params,
@@ -394,6 +431,38 @@ class Database:
             ).fetchall()
             status_counts = {row["status"]: row["cnt"] for row in status_rows}
 
+            latency_rows = conn.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN picked_at IS NOT NULL
+                        THEN CAST((julianday(picked_at) - julianday(created_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS queue_latency_ms,
+                    CASE
+                        WHEN finished_at IS NOT NULL AND picked_at IS NOT NULL
+                        THEN CAST((julianday(finished_at) - julianday(picked_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS execution_latency_ms
+                FROM commands
+                WHERE status IN ('done', 'failed')
+                  AND finished_at IS NOT NULL
+                ORDER BY finished_at DESC, id DESC
+                LIMIT 200
+                """
+            ).fetchall()
+
+        queue_latencies = [
+            int(row["queue_latency_ms"])
+            for row in latency_rows
+            if row["queue_latency_ms"] is not None
+        ]
+        execution_latencies = [
+            int(row["execution_latency_ms"])
+            for row in latency_rows
+            if row["execution_latency_ms"] is not None
+        ]
+
         return {
             "total_agents": total_agents,
             "online_agents": online_agents,
@@ -402,6 +471,11 @@ class Database:
             "sender_bots": sender_bots,
             "reporter_bots": reporter_bots,
             "bot_status_counts": status_counts,
+            "command_latency_sample_size": len(latency_rows),
+            "queue_latency_p95_ms": self._percentile(queue_latencies, 0.95),
+            "queue_latency_max_ms": max(queue_latencies) if queue_latencies else None,
+            "execution_latency_p95_ms": self._percentile(execution_latencies, 0.95),
+            "execution_latency_max_ms": max(execution_latencies) if execution_latencies else None,
         }
 
     def upsert_repeat_schedule(
@@ -788,6 +862,43 @@ class Database:
             )
         return int(cursor.rowcount or 0)
 
+    def list_bot_active_commands(self, bot_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM commands
+                WHERE bot_id = ? AND status IN ('pending', 'running')
+                ORDER BY id ASC
+                """,
+                (bot_id,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_bot_recent_commands(self, bot_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.*,
+                    CASE
+                        WHEN c.picked_at IS NOT NULL
+                        THEN CAST((julianday(c.picked_at) - julianday(c.created_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS queue_latency_ms,
+                    CASE
+                        WHEN c.finished_at IS NOT NULL AND c.picked_at IS NOT NULL
+                        THEN CAST((julianday(c.finished_at) - julianday(c.picked_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS execution_latency_ms
+                FROM commands c
+                WHERE c.bot_id = ?
+                ORDER BY c.id DESC
+                LIMIT ?
+                """,
+                (bot_id, limit),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def list_active_commands(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -802,7 +913,23 @@ class Database:
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM commands ORDER BY id DESC LIMIT ?",
+                """
+                SELECT
+                    c.*,
+                    CASE
+                        WHEN c.picked_at IS NOT NULL
+                        THEN CAST((julianday(c.picked_at) - julianday(c.created_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS queue_latency_ms,
+                    CASE
+                        WHEN c.finished_at IS NOT NULL AND c.picked_at IS NOT NULL
+                        THEN CAST((julianday(c.finished_at) - julianday(c.picked_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END AS execution_latency_ms
+                FROM commands c
+                ORDER BY c.id DESC
+                LIMIT ?
+                """,
                 (limit,),
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]

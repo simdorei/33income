@@ -14,6 +14,7 @@ from income33.control_tower.bot_command_routes import (
 from income33.control_tower.dashboard import render_dashboard_html
 from income33.control_tower.public_routes import register_public_routes
 from income33.control_tower.service import ControlTowerService
+from income33.control_tower.workflow_routes import register_workflow_routes
 from income33.db import Database
 from income33.logging_utils import setup_component_logger
 
@@ -46,6 +47,7 @@ def create_app(
     register_public_routes(app)
     register_bot_command_routes(app)
     register_agent_command_routes(app)
+    register_workflow_routes(app)
 
     logger.info(
         "control_tower_app_ready host=%s port=%s db_path=%s",

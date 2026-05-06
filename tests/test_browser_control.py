@@ -1602,6 +1602,11 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and
                                     "수입금액": 358474985,
                                 },
                                 {
+                                    "사업자번호": "232-17-02578",
+                                    "업종코드": "701101",
+                                    "수입금액": 0,
+                                },
+                                {
                                     "사업자번호": "000-00-00000",
                                     "업종코드": "940914",
                                     "수입금액": 5440000,
@@ -1679,13 +1684,29 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and
     assert result["memo_status_code"] == 200
     assert result["rate_cap_amount"] == 296817287
     assert result["eligible_expense_amount"] == 385348975
-    assert result["current_step"] == "경비율 계산 패스 taxDocId=1348568 customType=다 status=200"
+    assert "경비율 계산 패스 taxDocId=1348568 customType=다 status=200" in result["current_step"]
+    assert "mode=mixed" in result["current_step"]
+    assert "memo=200" in result["current_step"]
+    diagnostics = result["rate_based_source_diagnostics"]
+    assert diagnostics["business_income_source"] == "business-incomes.data.summary.itemList[].업종코드/사업자번호/수입금액"
+    assert diagnostics["business_income_sum_source"] == "business-incomes.data.summary.sum.수입금액"
+    assert diagnostics["expenses_business_number_source"] == "expenses-summary.data.list[].사업자등록번호"
+    assert diagnostics["year_end_card_source"].startswith("year-end-document.data.")
+    assert diagnostics["industry_codes"] == ["515060", "701101", "940914"]
+    assert diagnostics["real_estate_rental_industry_codes"] == ["701101"]
+    assert diagnostics["business_number_mode"] == "mixed"
+    assert diagnostics["item_count"] == 3
+    assert diagnostics["has_zero_business_number"] is True
+    assert diagnostics["has_general_business_number"] is True
+    assert diagnostics["rate_by_industry_code"]["701101"] == "0.245"
 
     skip_log = tmp_path / "bookkeeping_expense_rate_skips.jsonl"
     assert skip_log.exists()
     skip_log_text = skip_log.read_text(encoding="utf-8")
     assert '"tax_doc_id": 1348568' in skip_log_text
     assert '"custom_type": "다"' in skip_log_text
+    assert '"rate_based_source_diagnostics"' in skip_log_text
+    assert '"real_estate_rental_industry_codes": ["701101"]' in skip_log_text
     assert "232-17-02578" not in skip_log_text
     assert "385348975" not in skip_log_text
 
@@ -1762,7 +1783,50 @@ def test_send_rate_based_bookkeeping_expected_tax_amount_marks_da_when_rate_tota
     assert result["total_business_expense_amount"] == 8_820_000
     assert result["base_business_expense_amount"] == 9_000_000
     assert result["additional_expense_amount"] == -180_000
-    assert result["current_step"] == "경비율 계산 패스 taxDocId=1348249 customType=다 status=200"
+    assert "경비율 계산 패스 taxDocId=1348249 customType=다 status=200" in result["current_step"]
+    assert "mode=general_only" in result["current_step"]
+    assert "memo=200" in result["current_step"]
+    diagnostics = result["rate_based_source_diagnostics"]
+    assert diagnostics["industry_codes"] == ["515060"]
+    assert diagnostics["business_number_mode"] == "general_only"
+
+
+def test_send_rate_based_bookkeeping_expected_tax_amount_includes_source_diagnostics_on_fetch_failure(
+    monkeypatch,
+):
+    def fake_run_in_cdp_session(bot_id, payload, callback):
+        return callback(FakePage(), 29201)
+
+    def fake_fetch_required_json_data(page, *, url, headers, label):
+        if label == "business incomes lookup":
+            return {
+                "summary": {
+                    "sum": {"수입금액": 10_000_000},
+                    "itemList": [
+                        {
+                            "사업자번호": "123-45-67890",
+                            "업종코드": "701101",
+                            "수입금액": 10_000_000,
+                        }
+                    ],
+                }
+            }
+        if label == "year-end document lookup":
+            return {}
+        raise RuntimeError("expenses summary lookup failed status=503 url=https://ta-gw.3o3.co.kr/...")
+
+    monkeypatch.setattr(browser_control, "_run_in_cdp_session", fake_run_in_cdp_session)
+    monkeypatch.setattr(browser_control, "_fetch_required_json_data", fake_fetch_required_json_data)
+
+    with pytest.raises(RuntimeError, match="rate_based_source_diagnostics=") as exc_info:
+        browser_control.send_rate_based_bookkeeping_expected_tax_amount(
+            bot_id="sender-01",
+            payload={"tax_doc_id": 1348249},
+        )
+
+    message = str(exc_info.value)
+    assert "business-incomes.data.summary.itemList[].업종코드/사업자번호/수입금액" in message
+    assert '"industry_codes": ["701101"]' in message
 
 
 def test_send_rate_based_bookkeeping_expected_tax_amounts_collects_ta_list_then_processes_each_taxdoc(
@@ -3532,3 +3596,9 @@ def test_send_expected_tax_amounts_dry_run_does_not_post(monkeypatch):
     assert result["dry_run"] is True
     assert result["sent_count"] == 3
     assert result["current_step"] == "계산발송 dry-run 3건"
+
+
+def test_is_session_recovery_exception_recognizes_context_loss_and_timeouts():
+    assert browser_control.is_session_recovery_exception("Execution context was destroyed") is True
+    assert browser_control.is_session_recovery_exception("gateway timeout") is True
+    assert browser_control.is_session_recovery_exception("unexpected validation error") is False

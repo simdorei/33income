@@ -9,7 +9,8 @@ def test_load_config_with_env_and_yaml(tmp_path, monkeypatch):
         "INCOME33_DB_PATH=data/test.db\n"
         "INCOME33_BOOTSTRAP_AGENT_COUNT=12\n"
         "INCOME33_AGENT_PC_ID=pc-17\n"
-        "INCOME33_AGENT_BOT_ID=reporter-08\n",
+        "INCOME33_AGENT_BOT_ID=reporter-08\n"
+        "INCOME33_AGENT_COMMAND_POLL_INTERVAL_SECONDS=0\n",
         encoding="utf-8",
     )
 
@@ -56,3 +57,5 @@ def test_load_config_with_env_and_yaml(tmp_path, monkeypatch):
     assert config.agent.pc_id == "pc-17"
     assert config.agent.bot_id == "reporter-08"
     assert config.agent.bot_type == "sender"
+    assert config.agent.heartbeat_interval_seconds == 5
+    assert config.agent.command_poll_interval_seconds == 1

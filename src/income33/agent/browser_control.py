@@ -121,6 +121,23 @@ def _env_float(name: str, fallback: float) -> float:
         return fallback
 
 
+def is_session_recovery_exception(exc: Exception | str) -> bool:
+    text = str(exc)
+    lowered = text.lower()
+    recovery_markers = (
+        "execution context was destroyed",
+        "session closed",
+        "target closed",
+        "context destroyed",
+        "cdp",
+        "network timeout",
+        "gateway timeout",
+        "fetch timeout",
+        "timeout",
+    )
+    return any(marker in lowered for marker in recovery_markers)
+
+
 def mask_secret(value: str | None) -> str:
     if value is None:
         return ""
@@ -4592,6 +4609,112 @@ def _business_number_mode(items: list[dict[str, Any]]) -> str:
     return "general_only"
 
 
+def _rate_based_source_diagnostics(*, business_income_data: dict[str, Any]) -> dict[str, Any]:
+    summary = business_income_data.get("summary") or {}
+    raw_items = summary.get("itemList") or []
+
+    industry_codes: list[str] = []
+    business_numbers: list[str] = []
+    for raw_item in raw_items:
+        industry_code = str(raw_item.get("업종코드") or "").strip()
+        business_number = str(raw_item.get("사업자번호") or "").strip()
+        if industry_code:
+            industry_codes.append(industry_code)
+        if business_number:
+            business_numbers.append(business_number)
+
+    unique_industry_codes = sorted(set(industry_codes))
+    has_zero_business_number = any(number == ZERO_BUSINESS_NUMBER for number in business_numbers)
+    has_general_business_number = any(number != ZERO_BUSINESS_NUMBER for number in business_numbers)
+    if has_zero_business_number and has_general_business_number:
+        business_number_mode = "mixed"
+    elif has_zero_business_number:
+        business_number_mode = "zero_only"
+    else:
+        business_number_mode = "general_only"
+
+    rate_by_industry_code: dict[str, str] = {}
+    for code in unique_industry_codes:
+        try:
+            rate_by_industry_code[code] = f"{_rate_for_industry_code(code):.3f}"
+        except Exception:
+            rate_by_industry_code[code] = "unknown"
+
+    real_estate_rental_codes = [
+        code
+        for code in unique_industry_codes
+        if code in REPORT_SKIP_AFTER_MINUS_AMOUNT_INDUSTRY_CODES
+    ]
+
+    return {
+        "business_income_source": "business-incomes.data.summary.itemList[].업종코드/사업자번호/수입금액",
+        "business_income_sum_source": "business-incomes.data.summary.sum.수입금액",
+        "expenses_business_number_source": "expenses-summary.data.list[].사업자등록번호",
+        "year_end_card_source": (
+            "year-end-document.data.신용카드등_신용카드|신용카드등_직불카드|신용카드등_현금영수증[].금액"
+        ),
+        "industry_codes": unique_industry_codes,
+        "real_estate_rental_industry_codes": real_estate_rental_codes,
+        "business_number_mode": business_number_mode,
+        "item_count": len(raw_items),
+        "has_zero_business_number": has_zero_business_number,
+        "has_general_business_number": has_general_business_number,
+        "rate_by_industry_code": rate_by_industry_code,
+    }
+
+
+def _safe_rate_based_source_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    safe_keys = (
+        "business_income_source",
+        "business_income_sum_source",
+        "expenses_business_number_source",
+        "year_end_card_source",
+        "industry_codes",
+        "real_estate_rental_industry_codes",
+        "business_number_mode",
+        "item_count",
+        "has_zero_business_number",
+        "has_general_business_number",
+        "rate_by_industry_code",
+    )
+    safe_value: dict[str, Any] = {}
+    for key in safe_keys:
+        if key in value:
+            safe_value[key] = value.get(key)
+    return safe_value
+
+
+def _format_diagnostic_codes_for_step(diagnostics: dict[str, Any]) -> str:
+    raw_codes = diagnostics.get("industry_codes")
+    if not isinstance(raw_codes, list):
+        return "-"
+    codes = [str(code).strip() for code in raw_codes if str(code).strip()]
+    if not codes:
+        return "-"
+    if len(codes) <= 4:
+        return ",".join(codes)
+    return f"{','.join(codes[:4])}+{len(codes) - 4}"
+
+
+def _rate_based_skip_current_step(
+    *,
+    tax_doc_id: int,
+    custom_type_status_code: Any,
+    memo_status_code: Any,
+    diagnostics: dict[str, Any],
+    fallback_mode: str | None = None,
+) -> str:
+    mode = str(diagnostics.get("business_number_mode") or fallback_mode or "-")
+    codes = _format_diagnostic_codes_for_step(diagnostics)
+    memo_status = str(memo_status_code) if memo_status_code is not None else "-"
+    return (
+        f"경비율 계산 패스 taxDocId={tax_doc_id} customType=다 status={custom_type_status_code} "
+        f"mode={mode} codes={codes} memo={memo_status}"
+    )
+
+
 def _expense_for_zero_only(rate_basis_amount: int, summary_income_amount: int, card_usage_amount: int) -> int:
     if summary_income_amount <= 10_000_000:
         return _floor_money(Decimal(rate_basis_amount) * Decimal("1.20"))
@@ -4727,6 +4850,9 @@ def _write_bookkeeping_expense_rate_skip_log(entry: dict[str, Any]) -> None:
         )
         if key in entry
     }
+    safe_diagnostics = _safe_rate_based_source_diagnostics(entry.get("rate_based_source_diagnostics"))
+    if safe_diagnostics:
+        safe_entry["rate_based_source_diagnostics"] = safe_diagnostics
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -4953,6 +5079,7 @@ def send_bookkeeping_expected_tax_amount(
     if raw_calculation_retry_delay_seconds is None:
         raw_calculation_retry_delay_seconds = _env_float("INCOME33_BOOKKEEPING_CALCULATION_RETRY_DELAY_SECONDS", 1.0)
     bookkeeping_calculation_retry_delay_seconds = max(0.0, float(raw_calculation_retry_delay_seconds))
+    rate_based_source_diagnostics = _safe_rate_based_source_diagnostics(payload.get("rate_based_source_diagnostics"))
 
     def _run(page: Any, debug_port: int) -> dict[str, Any]:
         if not str(page.url).startswith("https://newta.3o3.co.kr"):
@@ -5090,7 +5217,12 @@ def send_bookkeeping_expected_tax_amount(
                 headers=summary_headers,
                 memo=_rate_based_total_expense_memo(memo_total_expense_amount),
             )
-            current_step = f"경비율 계산 패스 taxDocId={tax_doc_id} customType=다 status={custom_response.get('status')}"
+            current_step = _rate_based_skip_current_step(
+                tax_doc_id=tax_doc_id,
+                custom_type_status_code=custom_response.get("status"),
+                memo_status_code=memo_response.get("status"),
+                diagnostics=rate_based_source_diagnostics,
+            )
             result = {
                 "ok": True,
                 "dry_run": False,
@@ -5112,6 +5244,7 @@ def send_bookkeeping_expected_tax_amount(
                 "custom_type_status_code": custom_response.get("status"),
                 "memo_status_code": memo_response.get("status"),
                 "memo_total_business_expense_amount": memo_total_expense_amount,
+                "rate_based_source_diagnostics": rate_based_source_diagnostics,
             }
             _write_bookkeeping_expense_rate_skip_log(result)
             return result
@@ -5186,6 +5319,7 @@ def send_bookkeeping_expected_tax_amount(
             "submit_fee": advised_fee_amount,
             "advised_fee_amount": advised_fee_amount,
             "send_body": send_body,
+            "rate_based_source_diagnostics": rate_based_source_diagnostics,
         }
 
     result = _run_in_cdp_session(bot_id, payload, _run)
@@ -5274,23 +5408,34 @@ def send_rate_based_bookkeeping_expected_tax_amount(
             headers=_headers(gross_income_web_path),
             label="business incomes lookup",
         )
-        year_end_document_data = _fetch_required_json_data(
-            page,
-            url=f"{api_base_url}/api/tax/v1/gitax/year-end-document/{tax_doc_id}",
-            headers=_headers(year_end_web_path),
-            label="year-end document lookup",
+        rate_based_source_diagnostics = _rate_based_source_diagnostics(
+            business_income_data=business_income_data
         )
-        expenses_summary_data = _fetch_required_json_data(
-            page,
-            url=f"{api_base_url}/api/tax/v1/gitax/expenses/{tax_doc_id}/expenses-summary",
-            headers=_headers(expenses_web_path),
-            label="expenses summary lookup",
-        )
-        calculation = _calculate_rate_based_total_business_expense(
-            business_income_data=business_income_data,
-            year_end_document_data=year_end_document_data,
-            expenses_summary_data=expenses_summary_data,
-        )
+        try:
+            year_end_document_data = _fetch_required_json_data(
+                page,
+                url=f"{api_base_url}/api/tax/v1/gitax/year-end-document/{tax_doc_id}",
+                headers=_headers(year_end_web_path),
+                label="year-end document lookup",
+            )
+            expenses_summary_data = _fetch_required_json_data(
+                page,
+                url=f"{api_base_url}/api/tax/v1/gitax/expenses/{tax_doc_id}/expenses-summary",
+                headers=_headers(expenses_web_path),
+                label="expenses summary lookup",
+            )
+            calculation = _calculate_rate_based_total_business_expense(
+                business_income_data=business_income_data,
+                year_end_document_data=year_end_document_data,
+                expenses_summary_data=expenses_summary_data,
+            )
+        except Exception as exc:
+            diagnostics_json = json.dumps(
+                rate_based_source_diagnostics,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            raise RuntimeError(f"{exc} rate_based_source_diagnostics={diagnostics_json}") from exc
         calculation.update(
             {
                 "ok": True,
@@ -5299,6 +5444,7 @@ def send_rate_based_bookkeeping_expected_tax_amount(
                 "debug_port": debug_port,
                 "tax_doc_id": tax_doc_id,
                 "submit_account_type": submit_account_type,
+                "rate_based_source_diagnostics": rate_based_source_diagnostics,
             }
         )
         if calculation.get("skipped"):
@@ -5321,9 +5467,12 @@ def send_rate_based_bookkeeping_expected_tax_amount(
             calculation["custom_type_status_code"] = custom_response.get("status")
             calculation["memo_status_code"] = memo_response.get("status")
             calculation["memo_total_business_expense_amount"] = memo_total_expense_amount
-            calculation["current_step"] = (
-                f"경비율 계산 패스 taxDocId={tax_doc_id} "
-                f"customType=다 status={custom_response.get('status')}"
+            calculation["current_step"] = _rate_based_skip_current_step(
+                tax_doc_id=tax_doc_id,
+                custom_type_status_code=custom_response.get("status"),
+                memo_status_code=memo_response.get("status"),
+                diagnostics=_safe_rate_based_source_diagnostics(calculation.get("rate_based_source_diagnostics")),
+                fallback_mode=str(calculation.get("business_number_mode") or "-"),
             )
             _write_bookkeeping_expense_rate_skip_log(calculation)
             logger.warning(
@@ -5349,6 +5498,9 @@ def send_rate_based_bookkeeping_expected_tax_amount(
     send_payload["submit_account_type"] = submit_account_type
     send_payload["total_business_expense_amount"] = int(rate_result["total_business_expense_amount"])
     send_payload["mark_custom_type_da_on_negative_additional_expense"] = True
+    send_payload["rate_based_source_diagnostics"] = _safe_rate_based_source_diagnostics(
+        rate_result.get("rate_based_source_diagnostics")
+    )
     send_result = send_bookkeeping_expected_tax_amount(
         bot_id=bot_id,
         payload=send_payload,

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from income33.control_tower.session_models import build_session_adhesion_read_model
 from income33.db import Database
 from income33.models import COMMAND_TYPES
 from income33.status_mirror import StatusMirror
@@ -282,8 +283,16 @@ class ControlTowerService:
     def list_agents(self) -> list[dict[str, Any]]:
         return self.db.list_agents()
 
+    def _attach_session_read_model(self, bot_row: dict[str, Any]) -> dict[str, Any]:
+        agent = self.db.get_agent(str(bot_row.get("pc_id") or ""))
+        model = build_session_adhesion_read_model(bot_row=bot_row, agent_row=agent)
+        merged = dict(bot_row)
+        merged.update(model.to_dict())
+        return merged
+
     def list_bots(self, bot_type: str | None = None) -> list[dict[str, Any]]:
-        return self.db.list_bots(bot_type=bot_type)
+        rows = self.db.list_bots(bot_type=bot_type)
+        return [self._attach_session_read_model(dict(row)) for row in rows]
 
     def stop_and_clear_active_for_cohort(self, *, bot_type: str) -> list[dict[str, Any]]:
         bots = sorted(
@@ -308,6 +317,41 @@ class ControlTowerService:
 
     def list_recent_commands(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.db.list_recent_commands(limit=limit)
+
+    def list_bot_active_commands(self, *, bot_id: str) -> list[dict[str, Any]]:
+        if self.db.get_bot(bot_id) is None:
+            raise KeyError(f"bot not found: {bot_id}")
+        return self.db.list_bot_active_commands(bot_id=bot_id)
+
+    def list_bot_recent_commands(self, *, bot_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        if self.db.get_bot(bot_id) is None:
+            raise KeyError(f"bot not found: {bot_id}")
+        return self.db.list_bot_recent_commands(bot_id=bot_id, limit=limit)
+
+    def get_bot_session_view(self, *, bot_id: str) -> dict[str, Any]:
+        bots = self.list_bots()
+        row = next((dict(bot) for bot in bots if str(bot.get("bot_id") or "") == bot_id), None)
+        if row is None:
+            raise KeyError(f"bot not found: {bot_id}")
+
+        return {
+            "bot_id": row.get("bot_id"),
+            "bot_type": row.get("bot_type"),
+            "pc_id": row.get("pc_id"),
+            "status": row.get("status"),
+            "current_step": row.get("current_step"),
+            "last_heartbeat_at": row.get("last_heartbeat_at"),
+            "heartbeat_age_seconds": row.get("heartbeat_age_seconds"),
+            "last_command_queue_latency_ms": row.get("last_command_queue_latency_ms"),
+            "last_command_execution_latency_ms": row.get("last_command_execution_latency_ms"),
+            "session_status": row.get("session_status"),
+            "last_session_active_at": row.get("last_session_active_at"),
+            "last_probe_at": row.get("last_probe_at"),
+            "last_refresh_at": row.get("last_refresh_at"),
+            "adhesion_level": row.get("adhesion_level"),
+            "adhesion_score": row.get("adhesion_score"),
+            "affinity": row.get("affinity"),
+        }
 
     def list_repeat_schedules(self) -> list[dict[str, Any]]:
         return self.db.list_repeat_schedules()
