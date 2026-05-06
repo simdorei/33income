@@ -1574,6 +1574,144 @@ def test_operator_requested_real_estate_industry_codes_floor_to_245_percent_rate
     } == {code: browser_control.Decimal("0.245") for code in requested_codes}
 
 
+def test_rate_based_zero_only_uses_zero_income_sum_for_one_point_two():
+    result = browser_control._calculate_rate_based_total_business_expense(
+        business_income_data={
+            "summary": {
+                "sum": {"수입금액": 9_000_000},
+                "itemList": [
+                    {"사업자번호": "000-00-00000", "업종코드": "701102", "수입금액": 6_000_000},
+                    {"사업자번호": "000-00-00000", "업종코드": "940914", "수입금액": 3_000_000},
+                ],
+            }
+        },
+        year_end_document_data={},
+        expenses_summary_data={"list": []},
+    )
+
+    assert result["business_number_mode"] == "zero_only"
+    assert result["zero_income_amount"] == 9_000_000
+    assert result["general_income_amount"] == 0
+    assert result["zero_rate_basis_expense_amount"] == 3_699_000
+    assert result["total_business_expense_amount"] == 4_438_800
+
+
+def test_rate_based_zero_only_uses_zero_income_sum_for_one_point_one():
+    result = browser_control._calculate_rate_based_total_business_expense(
+        business_income_data={
+            "summary": {
+                "sum": {"수입금액": 11_000_000},
+                "itemList": [
+                    {"사업자번호": "000-00-00000", "업종코드": "701102", "수입금액": 7_000_000},
+                    {"사업자번호": "000-00-00000", "업종코드": "940914", "수입금액": 4_000_000},
+                ],
+            }
+        },
+        year_end_document_data={},
+        expenses_summary_data={"list": []},
+    )
+
+    assert result["business_number_mode"] == "zero_only"
+    assert result["zero_income_amount"] == 11_000_000
+    assert result["general_income_amount"] == 0
+    assert result["zero_rate_basis_expense_amount"] == 4_687_000
+    assert result["total_business_expense_amount"] == 5_155_700
+
+
+def test_rate_based_mixed_uses_zero_side_point_nine_five_not_zero_only_multiplier():
+    result = browser_control._calculate_rate_based_total_business_expense(
+        business_income_data={
+            "summary": {
+                "sum": {"수입금액": 16_000_000},
+                "itemList": [
+                    {"사업자번호": "000-00-00000", "업종코드": "701102", "수입금액": 6_000_000},
+                    {"사업자번호": "123-45-67890", "업종코드": "930203", "수입금액": 10_000_000},
+                ],
+            }
+        },
+        year_end_document_data={},
+        expenses_summary_data={"list": []},
+    )
+
+    assert result["business_number_mode"] == "mixed"
+    assert result["zero_income_amount"] == 6_000_000
+    assert result["zero_rate_basis_expense_amount"] == 1_470_000
+    assert result["zero_expense_amount"] == 1_396_500
+    assert result["zero_expense_amount"] != 1_764_000
+    assert result["general_expense_amount"] == 8_075_200
+    assert result["total_business_expense_amount"] == 9_471_700
+    assert result["skipped"] is False
+
+
+def test_rate_based_mixed_general_skip_preserves_zero_side_and_total_context():
+    result = browser_control._calculate_rate_based_total_business_expense(
+        business_income_data={
+            "summary": {
+                "sum": {"수입금액": 363_914_985},
+                "itemList": [
+                    {"사업자번호": "232-17-02578", "업종코드": "515060", "수입금액": 358_474_985},
+                    {"사업자번호": "232-17-02578", "업종코드": "701101", "수입금액": 0},
+                    {"사업자번호": "000-00-00000", "업종코드": "940914", "수입금액": 5_440_000},
+                ],
+            }
+        },
+        year_end_document_data={
+            "신용카드등_신용카드": [{"금액": 43_017_489}],
+            "신용카드등_직불카드": [{"금액": 7_478_370}],
+            "신용카드등_현금영수증": [{"금액": 1_848_805}],
+        },
+        expenses_summary_data={
+            "list": [
+                {
+                    "사업자등록번호": "232-17-02578",
+                    "세금계산서": 342_845_869,
+                    "계산서": 174_610,
+                    "현금영수증": 1_343_142,
+                    "사업용_신용카드": 35_785_354,
+                    "화물운전자_복지카드": 0,
+                    "인건비": 5_200_000,
+                    "사회보험료": 0,
+                    "이자상환액": None,
+                    "기부금": 0,
+                    "감가상각비": None,
+                }
+            ]
+        },
+    )
+
+    assert result["business_number_mode"] == "mixed"
+    assert result["skipped"] is True
+    assert result["reason"] == "eligible_expense_exceeds_rate_cap"
+    assert result["zero_rate_basis_expense_amount"] == 4_041_920
+    assert result["zero_expense_amount"] == 3_839_824
+    assert result["rate_cap_amount"] == 296_817_287
+    assert result["eligible_expense_amount"] == 385_348_975
+    assert result["general_expense_amount"] == 296_817_287
+    assert result["total_business_expense_amount"] == 300_657_111
+    assert browser_control._rate_based_total_expense_for_memo(result) == 300_657_111
+
+
+def test_rate_based_general_only_regression_preserves_existing_total():
+    result = browser_control._calculate_rate_based_total_business_expense(
+        business_income_data={
+            "summary": {
+                "sum": {"수입금액": 10_000_000},
+                "itemList": [
+                    {"사업자번호": "123-45-67890", "업종코드": "515060", "수입금액": 10_000_000},
+                ],
+            }
+        },
+        year_end_document_data={},
+        expenses_summary_data={"list": []},
+    )
+
+    assert result["business_number_mode"] == "general_only"
+    assert result["zero_rate_basis_expense_amount"] == 0
+    assert result.get("zero_expense_amount", 0) == 0
+    assert result["total_business_expense_amount"] == 8_820_000
+    assert result["skipped"] is False
+
+
 def test_send_rate_based_bookkeeping_expected_tax_amount_sets_custom_type_da_and_logs_skip(
     monkeypatch,
     tmp_path,

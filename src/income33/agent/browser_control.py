@@ -4715,14 +4715,14 @@ def _rate_based_skip_current_step(
     )
 
 
-def _expense_for_zero_only(rate_basis_amount: int, summary_income_amount: int, card_usage_amount: int) -> int:
-    if summary_income_amount <= 10_000_000:
+def _expense_for_zero_only(rate_basis_amount: int, zero_income_amount: int, card_usage_amount: int) -> int:
+    if zero_income_amount <= 10_000_000:
         return _floor_money(Decimal(rate_basis_amount) * Decimal("1.20"))
-    if summary_income_amount <= 20_000_000:
+    if zero_income_amount <= 20_000_000:
         return _floor_money(Decimal(rate_basis_amount) * Decimal("1.10"))
-    if summary_income_amount <= 50_000_000:
+    if zero_income_amount <= 50_000_000:
         return _floor_money(Decimal(rate_basis_amount) * Decimal("0.98"))
-    if summary_income_amount <= 100_000_000:
+    if zero_income_amount <= 100_000_000:
         return min(
             _floor_money((Decimal(card_usage_amount) + Decimal(40_000_000)) * Decimal("0.98")),
             _floor_money(Decimal(rate_basis_amount) * Decimal("0.95")),
@@ -4788,6 +4788,8 @@ def _calculate_rate_based_total_business_expense(
 
     zero_items = [item for item in items if item["business_number"] == ZERO_BUSINESS_NUMBER]
     general_items = [item for item in items if item["business_number"] != ZERO_BUSINESS_NUMBER]
+    zero_income_amount = sum(int(item["income_amount"]) for item in zero_items)
+    general_income_amount = sum(int(item["income_amount"]) for item in general_items)
     zero_rate_basis_amount = sum(int(item["rate_basis_expense_amount"]) for item in zero_items)
     general_rate_basis_amount = sum(int(item["rate_basis_expense_amount"]) for item in general_items)
     general_business_numbers = {item["business_number"] for item in general_items}
@@ -4800,6 +4802,8 @@ def _calculate_rate_based_total_business_expense(
         "skipped": False,
         "business_number_mode": mode,
         "summary_income_amount": summary_income_amount,
+        "zero_income_amount": zero_income_amount,
+        "general_income_amount": general_income_amount,
         "card_usage_amount": card_usage_amount,
         "eligible_expense_amount": general_eligible_expense_amount,
         "rate_basis_expense_amount": zero_rate_basis_amount + general_rate_basis_amount,
@@ -4811,9 +4815,11 @@ def _calculate_rate_based_total_business_expense(
     if mode == "zero_only":
         result["total_business_expense_amount"] = _expense_for_zero_only(
             zero_rate_basis_amount,
-            summary_income_amount,
+            zero_income_amount,
             card_usage_amount,
         )
+        result["zero_expense_amount"] = int(result["total_business_expense_amount"])
+        result["general_expense_amount"] = 0
         return result
 
     general_result = _expense_for_general_items(
@@ -4822,15 +4828,22 @@ def _calculate_rate_based_total_business_expense(
         eligible_expense_amount=general_eligible_expense_amount,
     )
     result.update(general_result)
-    if general_result.get("skipped"):
-        return result
 
     zero_expense_amount = 0
     if mode == "mixed":
         zero_expense_amount = _floor_money(Decimal(zero_rate_basis_amount) * Decimal("0.95"))
+
+    if general_result.get("skipped"):
+        general_expense_amount = int(general_result.get("rate_cap_amount") or 0)
+        result["zero_expense_amount"] = zero_expense_amount
+        result["general_expense_amount"] = general_expense_amount
+        result["total_business_expense_amount"] = zero_expense_amount + general_expense_amount
+        return result
+
+    general_expense_amount = int(general_result["expense_amount"])
     result["zero_expense_amount"] = zero_expense_amount
-    result["general_expense_amount"] = int(general_result["expense_amount"])
-    result["total_business_expense_amount"] = zero_expense_amount + int(general_result["expense_amount"])
+    result["general_expense_amount"] = general_expense_amount
+    result["total_business_expense_amount"] = zero_expense_amount + general_expense_amount
     return result
 
 
