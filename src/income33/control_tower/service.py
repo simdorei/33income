@@ -41,6 +41,28 @@ def reporter_one_click_submit_payload(custom_type_filter: str = REPORTER_ONE_CLI
     }
 
 
+def _format_last_workflow_result(bot: Mapping[str, Any]) -> str:
+    status = str(bot.get("last_workflow_command_status") or "").strip()
+    command_name = str(bot.get("last_workflow_command_name") or "").strip()
+    finished_at = str(bot.get("last_workflow_finished_at") or "").strip()
+    error_message = str(bot.get("last_workflow_error_message") or "").strip()
+
+    if not status or not command_name:
+        return ""
+
+    timestamp_suffix = f" @ {finished_at}" if finished_at else ""
+    if status == "done":
+        return f"done: {command_name}{timestamp_suffix}"
+
+    if status == "failed":
+        if error_message:
+            shortened_error = error_message if len(error_message) <= 120 else f"{error_message[:117]}..."
+            return f"failed: {command_name}{timestamp_suffix} ({shortened_error})"
+        return f"failed: {command_name}{timestamp_suffix}"
+
+    return f"{status}: {command_name}{timestamp_suffix}"
+
+
 def _coerce_utc_datetime(value: datetime | None) -> datetime:
     if value is None:
         return utc_now()
@@ -576,6 +598,7 @@ class ControlTowerService:
         for bot in bots:
             bot_id = str(bot.get("bot_id") or "")
             bot["active_command"] = ", ".join(active_by_bot.get(bot_id, []))
+            bot["last_workflow_result"] = _format_last_workflow_result(bot)
 
         return {
             "summary": self.get_summary(),

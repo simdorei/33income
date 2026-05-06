@@ -8,6 +8,16 @@ from typing import Any
 from income33.utils.time import now_utc_iso
 
 
+WORKFLOW_RESULT_COMMANDS: tuple[str, ...] = (
+    "send_expected_tax_amounts",
+    "send_simple_expense_rate_expected_tax_amounts",
+    "send_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amount",
+    "send_rate_based_bookkeeping_expected_tax_amounts",
+    "submit_tax_reports",
+)
+
+
 class Database:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -307,14 +317,49 @@ class Database:
         return [self._row_to_dict(row) for row in rows]
 
     def list_bots(self, bot_type: str | None = None) -> list[dict[str, Any]]:
+        workflow_placeholders = ", ".join("?" for _ in WORKFLOW_RESULT_COMMANDS)
+        latest_workflow_join = f"""
+            LEFT JOIN commands latest_workflow_command ON latest_workflow_command.id = (
+                SELECT c2.id
+                FROM commands c2
+                WHERE c2.bot_id = b.bot_id
+                  AND c2.status IN ('done', 'failed')
+                  AND c2.finished_at IS NOT NULL
+                  AND c2.command IN ({workflow_placeholders})
+                ORDER BY c2.finished_at DESC, c2.id DESC
+                LIMIT 1
+            )
+        """
+        select_columns = """
+            b.*,
+            latest_workflow_command.command AS last_workflow_command_name,
+            latest_workflow_command.status AS last_workflow_command_status,
+            latest_workflow_command.finished_at AS last_workflow_finished_at,
+            latest_workflow_command.error_message AS last_workflow_error_message
+        """
+        workflow_params: tuple[str, ...] = WORKFLOW_RESULT_COMMANDS
         with self._connect() as conn:
             if bot_type:
                 rows = conn.execute(
-                    "SELECT * FROM bots WHERE bot_type = ? ORDER BY bot_id ASC",
-                    (bot_type,),
+                    f"""
+                    SELECT {select_columns}
+                    FROM bots b
+                    {latest_workflow_join}
+                    WHERE b.bot_type = ?
+                    ORDER BY b.bot_id ASC
+                    """,
+                    (*workflow_params, bot_type),
                 ).fetchall()
             else:
-                rows = conn.execute("SELECT * FROM bots ORDER BY bot_id ASC").fetchall()
+                rows = conn.execute(
+                    f"""
+                    SELECT {select_columns}
+                    FROM bots b
+                    {latest_workflow_join}
+                    ORDER BY b.bot_id ASC
+                    """,
+                    workflow_params,
+                ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
     def get_agent(self, pc_id: str) -> dict[str, Any] | None:

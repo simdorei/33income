@@ -266,6 +266,120 @@ def test_dashboard_shows_active_command_per_bot_row(tmp_path):
     assert f"send_expected_tax_amounts[pending]#{command_id}" in root.text
 
 
+def test_dashboard_and_api_show_last_workflow_result_per_bot(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    completed = client.post(
+        f"/api/commands/{command_id}/complete",
+        json={"status": "done"},
+    )
+    assert completed.status_code == 200
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "last_workflow_result" in root.text
+    assert "done: send_expected_tax_amounts @ " in root.text
+
+    bots_payload = client.get("/api/bots")
+    assert bots_payload.status_code == 200
+    sender_row = next(row for row in bots_payload.json()["bots"] if row["bot_id"] == "sender-01")
+    assert sender_row["last_workflow_command_name"] == "send_expected_tax_amounts"
+    assert sender_row["last_workflow_command_status"] == "done"
+    assert sender_row["last_workflow_error_message"] is None
+    assert sender_row["last_workflow_finished_at"]
+
+
+def test_api_bots_last_workflow_result_uses_finished_at_not_command_id(tmp_path):
+    client = build_client(tmp_path)
+
+    first = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [111]}},
+    )
+    second = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_simple_expense_rate_expected_tax_amounts", "payload": {"tax_doc_ids": [222]}},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_id = first.json()["id"]
+    second_id = second.json()["id"]
+
+    # Complete the newer command first, then complete the older one later.
+    done_second = client.post(f"/api/commands/{second_id}/complete", json={"status": "done"})
+    assert done_second.status_code == 200
+    done_first = client.post(f"/api/commands/{first_id}/complete", json={"status": "done"})
+    assert done_first.status_code == 200
+
+    bots_payload = client.get("/api/bots")
+    assert bots_payload.status_code == 200
+    sender_row = next(row for row in bots_payload.json()["bots"] if row["bot_id"] == "sender-01")
+    assert sender_row["last_workflow_command_name"] == "send_expected_tax_amounts"
+
+
+def test_api_bots_last_workflow_result_ignores_non_workflow_command(tmp_path):
+    client = build_client(tmp_path)
+
+    workflow_queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "send_expected_tax_amounts", "payload": {"tax_doc_ids": [1360165]}},
+    )
+    non_workflow_queued = client.post(
+        "/api/bots/sender-01/commands",
+        json={"command": "status", "payload": {}},
+    )
+    assert workflow_queued.status_code == 200
+    assert non_workflow_queued.status_code == 200
+
+    workflow_done = client.post(
+        f"/api/commands/{workflow_queued.json()['id']}/complete",
+        json={"status": "done"},
+    )
+    assert workflow_done.status_code == 200
+
+    non_workflow_done = client.post(
+        f"/api/commands/{non_workflow_queued.json()['id']}/complete",
+        json={"status": "done"},
+    )
+    assert non_workflow_done.status_code == 200
+
+    bots_payload = client.get("/api/bots")
+    assert bots_payload.status_code == 200
+    sender_row = next(row for row in bots_payload.json()["bots"] if row["bot_id"] == "sender-01")
+    assert sender_row["last_workflow_command_name"] == "send_expected_tax_amounts"
+
+
+def test_dashboard_shows_failed_workflow_error_in_separate_column(tmp_path):
+    client = build_client(tmp_path)
+
+    queued = client.post(
+        "/api/bots/reporter-01/commands",
+        json={"command": "submit_tax_reports", "payload": {"tax_doc_ids": [1001]}},
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+
+    completed = client.post(
+        f"/api/commands/{command_id}/complete",
+        json={"status": "failed", "error_message": "bad <trace>"},
+    )
+    assert completed.status_code == 200
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "last_workflow_result" in root.text
+    assert "failed: submit_tax_reports @ " in root.text
+    assert "bad &lt;trace&gt;" in root.text
+    assert "last_heartbeat_at" in root.text
+
+
 def test_heartbeat_persists_agent_repo_version_fields_and_dashboard_shows_status(tmp_path):
     client = build_client(tmp_path)
 

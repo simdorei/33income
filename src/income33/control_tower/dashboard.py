@@ -363,6 +363,7 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
         "status",
         "current_step",
         "active_command",
+        "last_workflow_result",
         "last_heartbeat_at",
         "success_count",
         "failure_count",
